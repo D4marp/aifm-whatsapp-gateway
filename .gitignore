@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+scripts/api-out.txt
+scripts/api-err.txt
+
+# local logs and results
+scripts/*.log
+scripts/*.csv
+scripts/*-out.txt
+scripts/*-err.txt
+*.log
+*.png
+
+# the WhatsApp login (browser profile) lives outside the project; never add it here
+edge-profile/
+session/

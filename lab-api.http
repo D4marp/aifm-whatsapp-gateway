@@ -1,0 +1,59 @@
+# Test the lab API (Fake WhatsApp client). Run the API first:
+#   dotnet run --project src\WhatsAppLab.Api --urls http://localhost:5300
+# Open this file in VS Code (REST Client) or Visual Studio and click "Send Request". Swagger: http://localhost:5300/swagger
+
+@base = http://localhost:5300/api/whatsapp
+
+### 1. Status (feature is Off by default)
+GET {{base}}/status
+
+### 2. Switch the feature on (limits: 100 per day, 1 second between messages)
+PUT {{base}}/settings
+Content-Type: application/json
+
+{ "isEnabled": true, "maxMessagesPerDay": 100, "minSecondsBetweenMessages": 1, "receiveEnabled": true }
+
+### 3. Sync groups of the linked number, then list them
+POST {{base}}/groups/sync
+
+###
+GET {{base}}/groups
+
+### 4. Trigger by API: queue a message to a group (sent by the background worker)
+POST {{base}}/messages
+Content-Type: application/json
+
+{ "groupName": "IT Batam", "body": "Test from the API" }
+
+### 5. Scheduled: sent only when the time is due (UTC)
+POST {{base}}/messages
+Content-Type: application/json
+
+{ "groupName": "IT Batam", "body": "Scheduled test", "scheduledFor": "2026-11-14T08:00:00Z" }
+
+### 6. See the outbox (status 0 Pending, 1 Sent, 2 Failed)
+GET {{base}}/messages
+
+### 7. Recurring announcement (Hangfire), then run it now
+POST {{base}}/announcements
+Content-Type: application/json
+
+{ "id": "daily-test", "groupName": "IT Batam", "body": "Daily announcement", "cron": "0 9 * * *" }
+
+###
+POST {{base}}/announcements/daily-test/run-now
+
+### 8. Receive: simulate an incoming group message, then read what was recorded
+POST {{base}}/fake/incoming
+Content-Type: application/json
+
+{ "groupName": "IT Batam", "sender": "Karen", "body": "Hello from a member" }
+
+###
+GET {{base}}/inbound
+
+### 9. Failure test: the next send fails once, then is retried
+POST {{base}}/fake/fail-next
+
+### 10. What the fake client really "sent"
+GET {{base}}/fake/sent

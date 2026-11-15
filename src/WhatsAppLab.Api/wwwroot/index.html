@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp Lab Dashboard</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --mute:#5b6570; --line:#d9dde3; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --acc:#0f766e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171a; --card:#1d2227; --ink:#e8ebee; --mute:#9aa4af; --line:#333a42; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --acc:#2dd4bf; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; } h2 { font-size:14px; margin:0 0 10px; }
+  a { color:var(--acc); }
+  main { padding:16px 20px; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; min-width:0; }
+  .wide { grid-column:1/-1; }
+  label { display:block; color:var(--mute); font-size:12px; margin:8px 0 2px; }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  input, select, textarea { width:100%; } input[type=checkbox] { width:auto; } textarea { min-height:60px; resize:vertical; }
+  button { cursor:pointer; background:var(--acc); color:#fff; border-color:var(--acc); margin:10px 6px 0 0; }
+  button.alt { background:var(--bg); color:var(--ink); border-color:var(--line); }
+  button.danger { background:var(--bg); color:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { border:1px solid var(--line); border-radius:6px; padding:6px 10px; min-width:84px; }
+  .stat b { display:block; font-size:18px; } .stat span { color:var(--mute); font-size:12px; }
+  .pill { display:inline-block; border-radius:999px; padding:2px 10px; font-size:12px; border:1px solid var(--line); }
+  .pill.linked { color:var(--ok); border-color:var(--ok); } .pill.qr, .pill.loading { color:var(--warn); border-color:var(--warn); } .pill.disconnected { color:var(--mute); }
+  table { border-collapse:collapse; width:100%; font-size:13px; } th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
+  th { color:var(--mute); font-weight:600; }
+  .s0 { color:var(--warn); } .s1 { color:var(--ok); } .s2 { color:var(--bad); }
+  #log { font:12px/1.4 Consolas, monospace; white-space:pre-wrap; max-height:150px; overflow:auto; color:var(--mute); }
+  .row { display:flex; gap:10px; } .row > * { flex:1; }
+  .note { color:var(--mute); font-size:12px; }
+  .warn { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>WhatsApp Lab Dashboard</h1>
+  <span class="note" id="modeNote"></span>
+  <span><a href="/swagger" target="_blank">Swagger</a> · <a href="/hangfire" target="_blank">Hangfire</a></span>
+</header>
+<main>
+  <section>
+    <h2>1. Login WhatsApp</h2>
+    <div>State: <span class="pill disconnected" id="pill">...</span> <span class="note" id="clientline"></span></div>
+    <div id="connbtns">
+      <button id="bConnect" onclick="conn('connect')">Connect</button>
+      <button id="bDisc" class="alt" onclick="conn('disconnect')">Disconnect</button>
+      <button id="bReset" class="danger" onclick="resetSession()">Forget login</button>
+    </div>
+    <div class="note" style="margin-top:6px"><b>Connect</b> opens WhatsApp Web (an Edge window appears on this PC). <b>Disconnect</b> closes it but keeps the login. <b>Forget login</b> deletes the saved login: the next Connect needs a new QR.</div>
+    <div id="qrbox" style="display:none;margin-top:10px">
+      <b>Scan this QR:</b> WhatsApp on the phone &rarr; Linked devices &rarr; Link a device.<br>
+      <img id="qrimg" alt="QR code" style="width:260px;height:260px;background:#fff;padding:8px;border-radius:8px;margin-top:6px">
+    </div>
+    <div id="waitbox" class="note" style="display:none;margin-top:8px">Loading WhatsApp Web... the QR appears here in a few seconds (or the chats load if you were linked before).</div>
+    <div class="stats" id="stats" style="margin-top:12px"></div>
+    <label style="display:inline"><input type="checkbox" id="auto" checked> auto-refresh every 3 s</label>
+  </section>
+
+  <section>
+    <h2>2. Settings (feature is Off by default)</h2>
+    <label><input type="checkbox" id="setOn"> Enabled &mdash; when on, queued messages really go to WhatsApp</label>
+    <div class="row">
+      <div><label>Max messages per day</label><input id="setMax" type="number" value="15"></div>
+      <div><label>Min seconds between messages</label><input id="setMin" type="number" value="30"></div>
+    </div>
+    <div class="row">
+      <div><label>Random extra gap, up to (seconds)</label><input id="setJit" type="number" value="60"></div>
+      <div><label>&nbsp;</label><span class="note">a random 0..N s is added to every gap</span></div>
+    </div>
+    <div class="row">
+      <div><label>Send from hour (0-23, empty = any)</label><input id="setFrom" type="number" min="0" max="23" value="8"></div>
+      <div><label>until hour (exclusive)</label><input id="setTo" type="number" min="0" max="24" value="18"></div>
+    </div>
+    <div class="row">
+      <div><label>Wave: at most (messages)</label><input id="setWave" type="number" value="3"></div>
+      <div><label>per (minutes)</label><input id="setWin" type="number" value="90"></div>
+    </div>
+    <label><input type="checkbox" id="setRecv"> Receive group messages (reads unread chats; this marks them as read on the phone)</label>
+    <button onclick="saveSettings()">Save settings</button>
+    <button class="alt" onclick="preset()">Fill the safe preset</button>
+    <div class="note" style="margin-top:6px">Preset = what the team suggested: about 10-15 a day, in uneven waves (e.g. 3 messages, then a pause of 1.5 h), only in working hours. It lowers the chance of a block, it does not remove it. Hours use this PC's clock.</div>
+  </section>
+
+  <section>
+    <h2>3. Send a message (trigger: API)</h2>
+    <label>Group</label><select id="sendGroup"></select>
+    <label>Text</label><textarea id="sendBody">Test from the dashboard</textarea>
+    <label>Scheduled for (optional, your local time)</label><input id="sendWhen" type="datetime-local">
+    <button onclick="queueMessage()">Queue message</button>
+    <button class="alt" onclick="post('/groups/sync')">Sync chats / groups</button>
+    <div class="note" style="margin-top:6px">The message goes into the outbox; the background worker sends it when Enabled is on, the hours, wave and daily limits allow. Until then it stays <b class="s0">Pending</b>.</div>
+  </section>
+
+  <section>
+    <h2>4. Recurring announcement (Hangfire)</h2>
+    <div class="note">Sends the text and group chosen in step 3, on a schedule. Cron is in UTC (e.g. <code>0 2 * * *</code> = 09:00 in Batam). The job only puts the message in the outbox, so every limit above still applies.</div>
+    <div class="row"><div><label>Name</label><input id="anId" value="daily-announcement"></div><div><label>Cron (UTC)</label><input id="anCron" value="0 2 * * *"></div></div>
+    <button onclick="createAnnouncement()">Create / update</button>
+    <button class="alt" onclick="post('/announcements/' + $('anId').value + '/run-now')">Run now</button>
+    <button class="danger" onclick="removeAnnouncement()">Delete</button>
+  </section>
+
+  <section class="wide"><h2>Outbox (latest 50)</h2><div id="outbox"></div></section>
+  <section><h2>Groups / chats</h2><div id="groups"></div></section>
+  <section><h2>Inbound (latest 50)</h2><div id="inbound"></div></section>
+  <section><h2>Action log</h2><div id="log"></div></section>
+</main>
+<script>
+const B = '/api/whatsapp';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+const STATUS = ['Pending', 'Sent', 'Failed'];
+const PROC = ['New', 'Processed', 'Failed'];
+const CONN = { disconnected:'Not connected', loading:'Loading...', qr:'Waiting for QR scan', linked:'Linked', fake:'Fake client (always linked)' };
+function log(t) { $('log').textContent = new Date().toLocaleTimeString() + '  ' + t + '\n' + $('log').textContent; }
+async function call(method, path, body) {
+  const r = await fetch(B + path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const txt = await r.text();
+  if (!r.ok) throw new Error(r.status + ' ' + txt);
+  try { return JSON.parse(txt); } catch { return txt; }
+}
+async function post(path, body) { try { await call('POST', path, body); log('OK ' + path); } catch (e) { log('ERROR ' + path + ' ' + e.message); } refresh(); }
+async function conn(action) { log(action + '...'); await post('/connection/' + action); }
+async function resetSession() { if (confirm('Delete the saved WhatsApp login? The next Connect needs a new QR scan.')) await conn('reset'); }
+function table(rows, cols) {
+  if (!rows || !rows.length) return '<span class="note">Nothing yet.</span>';
+  return '<table><tr>' + cols.map(c => '<th>' + c[0] + '</th>').join('') + '</tr>' + rows.map(r => '<tr>' + cols.map(c => '<td>' + c[1](r) + '</td>').join('') + '</tr>').join('') + '</table>';
+}
+const pick = (o, ...k) => { for (const x of k) if (o[x] !== undefined && o[x] !== null) return o[x]; return ''; };
+let busy = false;
+async function refresh() {
+  if (busy) return; busy = true;
+  try {
+    const s = await call('GET', '/status');
+    const c = s.connection;
+    $('pill').className = 'pill ' + (c === 'fake' ? 'linked' : c); $('pill').textContent = CONN[c] ?? c;
+    $('clientline').textContent = s.client;
+    $('modeNote').innerHTML = '<span class="warn">Real WhatsApp: messages go to real groups.</span>';
+    $('connbtns').style.display = s.canControl ? 'block' : 'none';
+    $('bConnect').disabled = c !== 'disconnected'; $('bDisc').disabled = c === 'disconnected';
+    $('qrbox').style.display = (!s.linked && s.qr) ? 'block' : 'none';
+    if (!s.linked && s.qr) $('qrimg').src = s.qr;
+    $('waitbox').style.display = (c === 'loading' && !s.qr) ? 'block' : 'none';
+    $('stats').innerHTML = [['Enabled', s.enabled ? 'On' : 'Off'], ['Pending', s.pending], ['Sent', s.sent], ['Failed', s.failed]].map(x => '<div class="stat"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
+    const g = await call('GET', '/groups');
+    const cur = $('sendGroup').value;
+    $('sendGroup').innerHTML = g.map(x => '<option>' + esc(x.name) + '</option>').join('');
+    if (cur) $('sendGroup').value = cur;
+    $('groups').innerHTML = table(g, [['Name', r => esc(r.name)], ['Members', r => esc(pick(r, 'participantCount', 'members'))], ['Id', r => esc(pick(r, 'groupJid', 'jid', 'id'))]]);
+    const m = await call('GET', '/messages');
+    $('outbox').innerHTML = table(m, [
+      ['Status', r => '<b class="s' + r.status + '">' + (STATUS[r.status] ?? r.status) + '</b>'],
+      ['Text', r => esc(r.body)], ['Group', r => esc(pick(r, 'groupName', 'groupJid'))],
+      ['Source', r => ['Api', 'SqlTrigger', 'Scheduled'][r.source] ?? r.source], ['Attempts', r => esc(r.attempts)],
+      ['Scheduled (UTC)', r => esc(pick(r, 'scheduledFor'))], ['Sent (UTC)', r => esc(pick(r, 'sentOn', 'sentAt'))], ['Error', r => esc(pick(r, 'errorMessage'))]]);
+    const i = await call('GET', '/inbound');
+    $('inbound').innerHTML = table(i, [['Sender', r => esc(pick(r, 'sender', 'from', 'senderName'))], ['Text', r => esc(r.body)], ['State', r => esc(PROC[r.processStatus] ?? r.processStatus)]]);
+  } catch (e) { log('Cannot reach the API: ' + e.message); }
+  busy = false;
+}
+const num = id => $(id).value === '' ? null : +$(id).value;
+function preset() { $('setMax').value = 15; $('setMin').value = 30; $('setJit').value = 60; $('setFrom').value = 8; $('setTo').value = 18; $('setWave').value = 3; $('setWin').value = 90; }
+async function loadSettings() {
+  try {
+    const s = await call('GET', '/settings');
+    if (s.isEnabled === undefined) return;
+    $('setOn').checked = s.isEnabled; $('setMax').value = s.maxMessagesPerDay ?? ''; $('setMin').value = s.minSecondsBetweenMessages; $('setRecv').checked = s.receiveEnabled;
+    $('setJit').value = s.jitterSeconds ?? 0; $('setFrom').value = s.sendFromHour ?? ''; $('setTo').value = s.sendToHour ?? ''; $('setWave').value = s.maxPerWindow ?? ''; $('setWin').value = s.windowMinutes ?? '';
+  } catch {}
+}
+async function saveSettings() {
+  try {
+    await call('PUT', '/settings', { isEnabled: $('setOn').checked, maxMessagesPerDay: num('setMax'), minSecondsBetweenMessages: num('setMin') ?? 0, receiveEnabled: $('setRecv').checked,
+      jitterSeconds: num('setJit') ?? 0, sendFromHour: num('setFrom'), sendToHour: num('setTo'), maxPerWindow: num('setWave'), windowMinutes: num('setWin') });
+    log('Settings saved' + ($('setOn').checked ? ' (Enabled: messages will be sent)' : ' (Off)'));
+  } catch (e) { log('ERROR settings ' + e.message); }
+  refresh();
+}
+function queueMessage() {
+  const w = $('sendWhen').value;
+  const body = { groupName: $('sendGroup').value, body: $('sendBody').value };
+  if (w) body.scheduledFor = new Date(w).toISOString();
+  post('/messages', body);
+}
+async function removeAnnouncement() { try { await call('DELETE', '/announcements/' + $('anId').value); log('Deleted ' + $('anId').value); } catch (e) { log('ERROR ' + e.message); } }
+function createAnnouncement() { post('/announcements', { id: $('anId').value, groupName: $('sendGroup').value, body: $('sendBody').value, cron: $('anCron').value }); }
+loadSettings(); refresh();
+setInterval(() => { if ($('auto').checked) refresh(); }, 3000);
+</script>
+</body>
+</html>
