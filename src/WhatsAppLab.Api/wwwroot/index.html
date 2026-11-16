@@ -51,7 +51,7 @@
       <button id="bDisc" class="alt" onclick="conn('disconnect')">Disconnect</button>
       <button id="bReset" class="danger" onclick="resetSession()">Forget login</button>
     </div>
-    <div class="note" style="margin-top:6px"><b>Connect</b> opens WhatsApp Web (an Edge window appears on this PC). <b>Disconnect</b> closes it but keeps the login. <b>Forget login</b> deletes the saved login: the next Connect needs a new QR.</div>
+    <div class="note" style="margin-top:6px"><b>Connect</b> starts WhatsApp Web in the background (no window; the QR shows here). <b>Disconnect</b> closes it but keeps the login. <b>Forget login</b> deletes the saved login: the next Connect needs a new QR.</div>
     <div id="qrbox" style="display:none;margin-top:10px">
       <b>Scan this QR:</b> WhatsApp on the phone &rarr; Linked devices &rarr; Link a device.<br>
       <img id="qrimg" alt="QR code" style="width:260px;height:260px;background:#fff;padding:8px;border-radius:8px;margin-top:6px">
@@ -139,7 +139,7 @@ async function refresh() {
     const s = await call('GET', '/status');
     const c = s.connection;
     $('pill').className = 'pill ' + (c === 'fake' ? 'linked' : c); $('pill').textContent = CONN[c] ?? c;
-    $('clientline').textContent = s.client;
+    $('clientline').textContent = ''; $('clientline').title = s.client;   // the technical name is not needed on screen
     $('modeNote').innerHTML = '<span class="warn">Real WhatsApp: messages go to real groups.</span>';
     $('connbtns').style.display = s.canControl ? 'block' : 'none';
     $('bConnect').disabled = c !== 'disconnected'; $('bDisc').disabled = c === 'disconnected';
@@ -147,7 +147,7 @@ async function refresh() {
     if (!s.linked && s.qr) $('qrimg').src = s.qr;
     $('waitbox').style.display = (c === 'loading' && !s.qr) ? 'block' : 'none';
     $('stats').innerHTML = [['Enabled', s.enabled ? 'On' : 'Off'], ['Pending', s.pending], ['Sent', s.sent], ['Failed', s.failed]].map(x => '<div class="stat"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
-    const g = await call('GET', '/groups');
+    const g = (await call('GET', '/groups')).filter(x => x.isActive !== false);   // rows that were not seen in the last sync are hidden
     const cur = $('sendGroup').value;
     $('sendGroup').innerHTML = g.map(x => '<option>' + esc(x.name) + '</option>').join('');
     if (cur) $('sendGroup').value = cur;

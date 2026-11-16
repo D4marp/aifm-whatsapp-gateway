@@ -96,7 +96,13 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     private Microsoft.Playwright.IBrowserContext _context;
     private Microsoft.Playwright.IPage _page;
 
-    public RealWhatsAppClient(ILogger<RealWhatsAppClient> logger) { _logger = logger; }
+    // WhatsApp:ShowBrowser = true shows the Edge window (for debugging). Default: hidden, everything runs behind the scenes.
+    private readonly bool _showBrowser;
+    public RealWhatsAppClient(ILogger<RealWhatsAppClient> logger, Microsoft.Extensions.Configuration.IConfiguration config)
+    {
+        _logger = logger;
+        _showBrowser = string.Equals(config["WhatsApp:ShowBrowser"], "true", StringComparison.OrdinalIgnoreCase);
+    }
 
     public string LibraryName => "Real: WhatsApp Web via Playwright + Edge (lab)";
     public event Func<InboundMessage, Task> MessageReceived;
@@ -107,12 +113,14 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     private HashSet<string> _groupTitles = new();
     private readonly HashSet<string> _seen = new();      // message ids already handed over
     private readonly HashSet<string> _visited = new();   // chats read at least once since connecting
+    private readonly Dictionary<string, string> _lastSig = new();   // last seen row text per group (preview + time)
     private CancellationTokenSource _loopCts;
 
     public void SetReceiving(bool on) => _receiving = on;
 
-    private const string MessagesJs = @"() => [...document.querySelectorAll('#main div[data-id]')].map(m => { const pre = m.querySelector('[data-pre-plain-text]'); const txt = m.querySelector('span.selectable-text'); return { id: m.getAttribute('data-id'), pre: pre ? pre.getAttribute('data-pre-plain-text') : null, text: txt ? txt.innerText : null }; })";
-    private sealed class MsgInfo { public string id { get; set; } public string pre { get; set; } public string text { get; set; } }
+    // Direction (checked on the live page 16 Nov): ids and message-in/out classes carry no direction. An outgoing message has a tail-out icon and/or the labels "You:" / "Delivered" / "Read" / "Sent"; everything else is incoming.
+    private const string MessagesJs =@"() => [...document.querySelectorAll('#main div[data-id]')].map(m => { const pre = m.querySelector('[data-pre-plain-text]'); const txt = m.querySelector('span.selectable-text'); const isOut = !!m.querySelector(""[data-icon='tail-out']"") || [...m.querySelectorAll('[aria-label]')].some(a => /^(You:|Delivered|Read|Sent|Pending)\s*$/.test(a.getAttribute('aria-label'))); const dir = isOut ? 'out' : 'in'; return { id: m.getAttribute('data-id'), pre: pre ? pre.getAttribute('data-pre-plain-text') : null, text: txt ? txt.innerText : null, dir: dir }; })";
+    private sealed class MsgInfo { public string id { get; set; } public string pre { get; set; } public string text { get; set; } public string dir { get; set; } }
 
     private async Task ReceiveLoopAsync(CancellationToken token)
     {
@@ -126,14 +134,30 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
                 var p = _page;
                 if (p == null || p.IsClosed || !await ChatListVisibleAsync(p)) continue;
                 await p.Keyboard.PressAsync("Escape");
+                await ClearSearchAsync(p);
                 var rows = await ReadRowsAsync(p);
-                foreach (var row in rows.Where(r => r.unread != null && _groupTitles.Contains(r.title)).Take(3))
+                foreach (var r in rows.Where(r => r.unread != null))
+                    _logger.LogInformation("[REAL WhatsApp] receive: unread badge on '{Title}' ({Badge}), known group: {Known}", r.title, r.unread, _groupTitles.Contains(r.title));
+                // Found 16 Nov: the badge is gone when the phone already shows/reads the chat. So also treat a changed row (preview text or time) as new activity.
+                var known = rows.Where(r => r.title != null && _groupTitles.Contains(r.title)).ToList();
+                var changed = known.Where(r => r.unread != null || (_lastSig.TryGetValue(r.title, out var old) && old != r.text)).Take(3).ToList();
+                foreach (var r in known) if (!_lastSig.ContainsKey(r.title)) _lastSig[r.title] = r.text;   // first look: remember, do not replay old messages
+                foreach (var r in changed) _lastSig[r.title] = r.text;
+                foreach (var row in changed)
                 {
-                    var n = System.Text.RegularExpressions.Regex.Match(row.unread, @"\d+") is { Success: true } mm ? int.Parse(mm.Value) : 1;
+                    var n = System.Text.RegularExpressions.Regex.Match(row.unread ?? "1", @"\d+") is { Success: true } mm ? int.Parse(mm.Value) : 1;
                     await OpenChatAsync(p, row.title);
-                    await Task.Delay(800);
-                    var msgs = await p.EvaluateAsync<MsgInfo[]>(MessagesJs);
-                    var incoming = msgs.Where(m => m.id != null && m.id.StartsWith("false_") && m.text != null).ToList();
+                    MsgInfo[] msgs = Array.Empty<MsgInfo>();
+                    for (var k = 0; k < 10 && msgs.Length == 0; k++)   // headless loads the conversation slower: wait up to ~5 s for message nodes
+                    {
+                        await Task.Delay(500);
+                        msgs = await p.EvaluateAsync<MsgInfo[]>(MessagesJs);
+                    }
+                    // Found 16 Nov: data-id no longer starts with false_/true_ (it is a bare id), so direction comes from the message-in / message-out class.
+                    var incoming = msgs.Where(m => m.id != null && m.dir == "in" && m.text != null).ToList();
+                    _logger.LogInformation("[REAL WhatsApp] receive: opened '{Title}': {Nodes} message nodes, {Incoming} incoming, {WithText} with text; last: {Last}",
+                        row.title, msgs.Length, incoming.Count, msgs.Count(m => m.text != null),
+                        string.Join(",", msgs.TakeLast(3).Select(m => (m.dir ?? "?") + "/" + (m.pre != null ? "pre" : "nopre") + "/" + (m.text != null ? "txt" : "notxt"))));
                     List<MsgInfo> fresh;
                     if (_visited.Add(row.title)) fresh = incoming.TakeLast(Math.Min(n, 10)).ToList();   // first time: only what is unread (at most 10)
                     else fresh = incoming.Where(m => !_seen.Contains(m.id)).ToList();
@@ -145,6 +169,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
                         await MessageReceived.Invoke(new InboundMessage("chat:" + row.title, who + "@lab", who, m.text, DateTime.UtcNow));
                     }
                     await p.Keyboard.PressAsync("Escape");
+                    await ClearSearchAsync(p);
                 }
             }
             catch (Exception ex) { _logger.LogWarning("Receive cycle failed: {Msg}", ex.Message.Split('\n')[0]); }
@@ -160,7 +185,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
         _pw ??= await Microsoft.Playwright.Playwright.CreateAsync();
         _context = await _pw.Chromium.LaunchPersistentContextAsync(profile, new Microsoft.Playwright.BrowserTypeLaunchPersistentContextOptions
         {
-            Channel = "msedge", Headless = false, BypassCSP = true, Args = new[] { "--disable-quic" },   // QUIC failed on this network (ERR_QUIC_PROTOCOL_ERROR)
+            Channel = "msedge", Headless = !_showBrowser, BypassCSP = true, Args = new[] { "--disable-quic" },   // QUIC failed on this network (ERR_QUIC_PROTOCOL_ERROR)
  ViewportSize = new Microsoft.Playwright.ViewportSize { Width = 1100, Height = 800 }
         });
         _page = _context.Pages.FirstOrDefault() ?? await _context.NewPageAsync();
@@ -179,6 +204,14 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
         {
             if (_page == null || _page.IsClosed) { _connection = "disconnected"; return new WhatsAppLinkState(false, null, null); }   // not connected: never starts the browser by itself
             var p = _page;
+            // "WhatsApp is open in another window. Click Use here": this window takes the session back (it is ours: a second window of the lab, or one that was closed a moment ago)
+            var useHere = p.GetByRole(Microsoft.Playwright.AriaRole.Button, new Microsoft.Playwright.PageGetByRoleOptions { Name = "Use here" });
+            if (await useHere.CountAsync() > 0)
+            {
+                _logger.LogInformation("[REAL WhatsApp] 'open in another window' dialog: clicking Use here");
+                await useHere.First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 4000 });
+                await Task.Delay(2500);
+            }
             if (await ChatListVisibleAsync(p)) { _connection = "linked"; return new WhatsAppLinkState(true, "(linked)", null); }
             var qr = p.Locator("div[data-ref]").First;
             if (await qr.CountAsync() > 0)
@@ -196,8 +229,8 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
 
     // ---- groups: only real groups (the "Groups" filter of WhatsApp Web), with the member count read from the group info panel
     private const string ChatRows = "#pane-side [role='row'], #pane-side [role='listitem']";
-    private const string RowsJs = @"els => els.map(r => { const s = r.querySelector('span[title]'); const u = r.querySelector(""span[aria-label*='unread']""); return { title: s ? s.getAttribute('title') : null, unread: u ? u.getAttribute('aria-label') : null }; })";
-    private sealed class RowInfo { public string title { get; set; } public string unread { get; set; } }
+    private const string RowsJs = @"els => els.map(r => { const s = r.querySelector('span[title]'); const u = r.querySelector(""span[aria-label*='unread']""); return { title: s ? s.getAttribute('title') : null, unread: u ? u.getAttribute('aria-label') : null, text: r.innerText }; })";
+    private sealed class RowInfo { public string title { get; set; } public string unread { get; set; } public string text { get; set; } }
 
     private async Task<List<RowInfo>> ReadRowsAsync(Microsoft.Playwright.IPage p)
     {
@@ -212,6 +245,22 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
         var found = await chip.CountAsync() > 0;
         _logger.LogInformation("[REAL WhatsApp] filter chip '{Name}' found: {Found}", name, found);
         if (found) { await chip.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 4000 }); await Task.Delay(900); }
+    }
+
+    // Found 16 Nov: Escape does not empty the search box, and while it holds text the chat list shows search results, which carry no unread badge, so receiving saw nothing.
+    private static async Task ClearSearchAsync(Microsoft.Playwright.IPage p)
+    {
+        try
+        {
+            var search = p.Locator("#side input[role='textbox']").First;
+            if ((await search.InputValueAsync()).Length == 0) return;
+            await search.FocusAsync();
+            await p.Keyboard.PressAsync("Control+A");
+            await p.Keyboard.PressAsync("Backspace");
+            await p.Keyboard.PressAsync("Escape");
+            await Task.Delay(400);
+        }
+        catch { }
     }
 
     private async Task OpenChatAsync(Microsoft.Playwright.IPage p, string name)
@@ -233,10 +282,16 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
         {
             await OpenChatAsync(p, name);
             await p.Locator("#main header").First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 5000 });   // opens the group info panel
-            await Task.Delay(1500);
-            var text = await p.Locator("#app").InnerTextAsync(new Microsoft.Playwright.LocatorInnerTextOptions { Timeout = 5000 });
-            var m = System.Text.RegularExpressions.Regex.Match(text, @"Group\s*[·•\-]\s*(\d[\d.,]*)\s+members?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (!m.Success) m = System.Text.RegularExpressions.Regex.Match(text, @"(\d[\d.,]*)\s+members?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // the panel fills in a moment after it opens (slower when the browser is hidden): wait up to ~8 seconds for the "N members" text
+            var text = ""; System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Match.Empty;
+            for (var i = 0; i < 12 && !m.Success; i++)
+            {
+                await Task.Delay(700);
+                text = await p.Locator("#app").InnerTextAsync(new Microsoft.Playwright.LocatorInnerTextOptions { Timeout = 5000 });
+                m = System.Text.RegularExpressions.Regex.Match(text, @"Group\s*[·•\-]\s*(\d[\d.,]*)\s+(members?|participants?)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!m.Success) m = System.Text.RegularExpressions.Regex.Match(text, @"(\d[\d.,]*)\s+(members?|participants?)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            }
+            if (!m.Success) _logger.LogWarning("Member count: no 'N members' text for '{Name}'. Text seen around 'Group': {Snippet}", name, System.Text.RegularExpressions.Regex.Match(text, @".{0,60}Group.{0,80}", System.Text.RegularExpressions.RegexOptions.Singleline).Value.Replace("\n", " | "));
             await p.Keyboard.PressAsync("Escape"); await p.Keyboard.PressAsync("Escape");
             var n = m.Success ? int.Parse(System.Text.RegularExpressions.Regex.Replace(m.Groups[1].Value, @"[.,]", "")) : 0;
             _logger.LogInformation("[REAL WhatsApp] group '{Name}': {Count} members", name, n);
@@ -292,7 +347,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
             }
             await p.Keyboard.PressAsync("Enter");
             await Task.Delay(1500, ct);
-            await p.Keyboard.PressAsync("Escape");   // clear the search so the chat list is back to normal
+            await ClearSearchAsync(p);   // empty the search so the chat list is back to normal (and shows unread badges)
             _logger.LogInformation("[REAL WhatsApp] sent to {Name}", name);
             return new SendResult(true, null);
         }
@@ -315,7 +370,19 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
                 ids: ['side','pane-side','main','app'].map(i => i + ':' + !!document.getElementById(i)),
                 buttons: [...document.querySelectorAll('button[aria-label], [role=button][aria-label]')].slice(0, 20).map(e => e.getAttribute('aria-label'))
             })");
-            return new { shot, info };
+            // fixed read-only structure dump of the last messages of the first known group (no message text): used to find how outgoing and incoming messages differ
+            object msgs = null; List<string> dirs = null;
+            var first = _groupTitles.FirstOrDefault();
+            if (first != null && await ChatListVisibleAsync(p))
+            {
+                await OpenChatAsync(p, first);
+                await Task.Delay(2500);
+                msgs = await p.EvaluateAsync<object>(@"() => [...document.querySelectorAll('#main div[data-id]')].slice(-8).map(m => { const pre = m.querySelector('[data-pre-plain-text]'); return { cls: m.className, parentCls: m.parentElement ? m.parentElement.className : null, role: m.getAttribute('role'), icons: [...m.querySelectorAll('[data-icon]')].map(i => i.getAttribute('data-icon')), arias: [...m.querySelectorAll('[aria-label]')].map(i => i.getAttribute('aria-label')).slice(0, 4), sender: pre ? pre.getAttribute('data-pre-plain-text').replace(/^\[[^\]]*\]\s*/, '') : null, hasText: !!m.querySelector('span.selectable-text') }; })");
+                var all = await p.EvaluateAsync<MsgInfo[]>(MessagesJs);
+                dirs = all.TakeLast(8).Select(m => (m.dir ?? "?") + " / " + (m.pre != null ? m.pre.Substring(m.pre.IndexOf(']') + 1).Trim() : "-")).ToList();   // what the receive loop would decide for each
+                await ClearSearchAsync(p);
+            }
+            return new { shot, info, msgs, dirs };
         }
         finally { _gate.Release(); }
     }
