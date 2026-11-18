@@ -190,6 +190,13 @@ try {
     $free = try { $null = Post '/messages' @{ groupName = 'Lab Test Group'; body = 'A6 after the list is cleared' }; 'accepted' } catch { 'refused' }
     Check 'Allow-list: an empty list means no restriction' 'accepted' $free ($free -eq 'accepted')
 
+    # ---- anti-spam: the same text to the same group is refused for 2 minutes; a template with {rand} is not a duplicate
+    $null = Post '/messages' @{ groupName = 'IT Batam'; body = 'S1 exactly the same text' }
+    $dup = try { Post '/messages' @{ groupName = 'IT Batam'; body = 'S1 exactly the same text' }; 'accepted' } catch { "refused ($([int]$_.Exception.Response.StatusCode))" }
+    Check 'Anti-spam: the same text to the same group within 2 minutes is refused' 'refused (409)' $dup ($dup -like 'refused (409)')
+    $okT = try { $null = Post '/messages' @{ groupName = 'IT Batam'; body = 'S2 varied {rand}' }; $null = Post '/messages' @{ groupName = 'IT Batam'; body = 'S2 varied {rand}' }; 'both accepted' } catch { 'refused' }
+    Check 'Anti-spam: a template with {rand} gives different texts, so it is not refused' 'both accepted' $okT ($okT -eq 'both accepted')
+
     # ---- several numbers: each number has its own client, groups, settings, pacing, outbox and inbox
     $first = @(Arr "$base/sessions")[0].id
     $new = Post '/sessions' @{ name = 'Second number' }

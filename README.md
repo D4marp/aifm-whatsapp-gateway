@@ -2,14 +2,14 @@
 
 Layanan .NET mandiri untuk mengirim dan menerima pesan grup WhatsApp lewat WhatsApp Web (scan QR, tanpa WhatsApp Business API), untuk beberapa nomor, dengan database SQL Server sendiri dan API yang bisa dipanggil sistem lain (ERP). Proyek ini lab belajar dan uji, di luar repo ERP.
 
-Status per 18 Nov 2026 (rinci di `HASIL-POC-14-NOV-2026.md`, baris 1-32):
+Status per 18 Nov 2026 (rinci di `HASIL-POC-14-NOV-2026.md`, baris 1-34):
 
 | Bagian | Status |
 |---|---|
 | Kirim teks ke grup, terjadwal, pemicu API / SQL Server / Hangfire | Terbukti dengan WhatsApp sungguhan |
 | Terima pesan teks grup | Terbukti, dengan bug: pesan akun sendiri kadang ikut tersimpan. Perbaikan ditulis 18 Nov, belum diuji di halaman asli |
-| Beberapa nomor, variasi teks, daftar grup yang diizinkan, media (audio, video, gambar) | Lulus smoke test dengan klien Fake (35 dari 35); belum diuji dengan WhatsApp sungguhan |
-| Kirim file lewat WhatsApp Web | Kode ditulis, selektor masih dugaan, belum dijalankan |
+| Beberapa nomor, variasi teks, daftar grup yang diizinkan, anti-spam duplikat | Lulus smoke test dengan klien Fake (37 dari 37); daftar izin dan media dipakai dengan WhatsApp sungguhan 18 Nov |
+| Kirim audio (dengan teks), gambar, video lewat WhatsApp Web | Terbukti 18 Nov ke Advancer Wa test; lihat `PANDUAN-MEDIA-DAN-ANTI-SPAM.md` |
 | Terima file dari WhatsApp Web | Belum dibuat |
 | Autentikasi API, jalan di server | Belum ada |
 
@@ -72,7 +72,7 @@ Mematikan dengan aman: tekan Disconnect untuk tiap nomor dulu, baru hentikan pro
 ```text
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
 ```
-Memakai klien Fake, port 5310, database `WhatsAppLab` (dihapus dan dibuat ulang), folder media sementara. Hasil terakhir: 35 lulus dari 35. Hasil per uji ditulis ke `scripts\smoke-results.csv`.
+Memakai klien Fake, port 5310, database `WhatsAppLab` (dihapus dan dibuat ulang), folder media sementara. Hasil terakhir: 37 lulus dari 37. Hasil per uji ditulis ke `scripts\smoke-results.csv`.
 
 **B. Dengan dashboard dan WhatsApp sungguhan** (pakai nomor yang rela hilang, minta izin sebelum mengirim ke grup orang lain):
 1. Pilih nomor di atas (atau Add number), Connect, pindai QR dari HP: WhatsApp > Perangkat tertaut > Tautkan perangkat.
@@ -159,7 +159,9 @@ Sebelum masuk ERP masih perlu: API key per sistem pemanggil, uji media dengan Wh
 
 | Berkas | Isi |
 |---|---|
-| `HASIL-POC-14-NOV-2026.md` | Log semua uji (baris 1-32) |
+| `HASIL-POC-14-NOV-2026.md` | Log semua uji (baris 1-34) |
+| `PANDUAN-MEDIA-DAN-ANTI-SPAM.md` (+ PDF) | Cara kirim audio, gambar, video; lapisan anti-spam; cara cek dan masalah umum |
+| `scripts/restart-lab.ps1` | Restart aman (putus nomor dulu, build, jalankan) |
 | `POC-REPORT-MAA-2102.md` / `.id.md` (+ PDF) | Laporan POC untuk CW |
 | `DESAIN-SISTEM-MAA-2102(.id).html` (+ PDF) | Gambar arsitektur dan alur dispatcher |
 | `STUDY-NEXT-PHASE-MAA-2102.md`, `STUDI-FASE-LANJUT-MAA-2102.md` (+ PDF) | Studi implementasi dan keamanan fase lanjut |

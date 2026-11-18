@@ -419,9 +419,12 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     }
 
     /// <summary>
-    /// EXPERIMENTAL (written 17 Nov, not yet run against the live page): sends a file through the attach menu of WhatsApp Web.
-    /// The selectors below are the first guess and must be confirmed with a real send to a test chat; a failure returns the reason so the next attempt can fix the selector.
-    /// An audio file goes as a document-style audio attachment, not as a voice note.
+    /// Sends a file through the attach menu of WhatsApp Web. Selectors checked on the live page on 18 Nov with the read-only probes:
+    /// attach button "Attach"; menu items "Audio" / "Photos &amp; videos" / "Document"; preview send button "Send 1 selected";
+    /// caption box "Type a message" inside the preview (images and videos only; the audio preview has NO caption box).
+    /// Audio with text: the audio is sent first, then the text as a second message right after it (WhatsApp Web cannot put a caption on audio).
+    /// The send counts as done only when the preview has closed; otherwise it fails, so the outbox never says Sent for a file that stayed in the preview.
+    /// An audio file goes as an audio attachment, not as a voice note.
     /// </summary>
     public async Task<SendResult> SendGroupMediaAsync(string groupJid, string filePath, string mimeType, string caption, CancellationToken ct)
     {
@@ -436,38 +439,206 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
             await OpenChatAsync(p, name);
             await p.Locator("footer div[contenteditable='true']").First.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
 
-            // 1) open the attach menu
-            await p.Locator("footer [data-icon='plus'], footer [data-icon='attach-menu-plus'], footer button[aria-label='Attach']").First
-                .ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 });
-            await Task.Delay(700, ct);
-
-            // 2) the menu holds hidden file inputs: one for photos and videos, one for documents
-            var asMedia = mimeType != null && (mimeType.StartsWith("video/") || mimeType.StartsWith("image/"));
-            var input = asMedia
-                ? p.Locator("input[type='file'][accept*='image'], input[type='file'][accept*='video']").First
-                : p.Locator("input[type='file']:not([accept*='image']):not([accept*='video'])").First;
-            await input.SetInputFilesAsync(filePath, new Microsoft.Playwright.LocatorSetInputFilesOptions { Timeout = 8000 });
-
-            // 3) the preview opens; add the caption (the last editable box is the caption) and press send
-            await Task.Delay(1500, ct);
-            if (!string.IsNullOrEmpty(caption))
+            // 0) remove a file left in the composer by an earlier attempt (seen 18 Nov: "Remove attachment" in the preview). Only that button is pressed;
+            //    Escape is NOT used here because it also closed the open chat. Nothing is sent by this.
+            var leftover = p.Locator("[aria-label='Remove attachment']");
+            if (await leftover.CountAsync() > 0)
             {
-                var cap = p.Locator("div[contenteditable='true']").Last;
-                await cap.FocusAsync();
-                await p.Keyboard.TypeAsync(caption, new Microsoft.Playwright.KeyboardTypeOptions { Delay = 15 });
+                await leftover.First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 4000 });
+                await Task.Delay(700, ct);
             }
-            var send = p.Locator("[aria-label='Send'], div[role='button'] [data-icon='send']").Last;
-            await send.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 15000 });
+
+            // 1) open the attach menu (button aria-label "Attach") and wait until the wanted item is really visible.
+            //    18 Nov: once the item was not there yet ("waiting for button[aria-label='Audio']"), so the menu is opened again if needed.
+            var item = MenuItemFor(mimeType);
+            var isAudio = item == "Audio";
+            await OpenAttachMenuAsync(p, item);
+
+            // 2) pick the menu item by type; WhatsApp creates the file input only after the item is clicked, so wait for the file chooser instead
+            //    (menu items seen 18 Nov: "Audio", "Photos & videos", "Document")
+            var chooser = await p.RunAndWaitForFileChooserAsync(
+                () => p.Locator($"button[aria-label='{item}']").First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 }),
+                new Microsoft.Playwright.PageRunAndWaitForFileChooserOptions { Timeout = 8000 });
+            await chooser.SetFilesAsync(filePath);
+
+            // 3) wait for the preview's send button; a large video needs time to be processed before it appears
+            var send = p.Locator("[aria-label='Send 1 selected']").First;
+            await send.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 90000 });
+            await Task.Delay(800, ct);
+
+            // 4) caption: images and videos have a caption box in the preview; audio does not (its text is sent after the file, step 6)
+            var hasText = !string.IsNullOrWhiteSpace(caption);
+            if (hasText && !isAudio)
+            {
+                var cap = p.Locator("div[contenteditable='true'][aria-label='Type a message']").First;
+                await cap.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
+                await cap.FocusAsync();
+                await TypeLinesAsync(p, caption);
+            }
+
+            // 5) send, then wait until the preview is gone (upload done). Still open = not sent: fail instead of reporting Sent.
             await send.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 8000 });
-            await Task.Delay(4000, ct);   // give the upload time to start; a video can take longer than this to finish
-            if (!string.IsNullOrEmpty(caption)) RememberSent(caption);
+            var closed = false;
+            for (var i = 0; i < 120 && !closed; i++)   // up to about 2 minutes for a large video
+            {
+                await Task.Delay(1000, ct);
+                closed = await p.Locator("[aria-label='Remove attachment']").CountAsync() == 0 && await p.Locator("[aria-label='Send 1 selected']").CountAsync() == 0;
+            }
+            if (!closed) return new SendResult(false, "The file preview did not close after pressing send; the file was probably not sent. It is still in the composer and is removed on the next attempt.");
+            if (hasText && !isAudio) RememberSent(caption);
+
+            // 6) audio with text: the text goes as the next message, straight after the audio
+            if (hasText && isAudio)
+            {
+                var box = p.Locator("footer div[contenteditable='true']").First;
+                await box.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
+                await box.FocusAsync();
+                await TypeLinesAsync(p, caption);
+                await p.Keyboard.PressAsync("Enter");
+                await Task.Delay(1500, ct);
+                RememberSent(caption);
+            }
+
             await ClearSearchAsync(p);
-            _logger.LogInformation("[REAL WhatsApp] file sent to {Name}: {File}", name, Path.GetFileName(filePath));
+            _logger.LogInformation("[REAL WhatsApp] file sent to {Name}: {File}{Text}", name, Path.GetFileName(filePath), hasText ? (isAudio ? " + text as next message" : " with caption") : "");
             return new SendResult(true, null);
         }
-        catch (Exception ex) { _logger.LogWarning(ex, "Send file failed"); return new SendResult(false, ex.Message.Split('\n')[0]); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Send file failed"); return new SendResult(false, ex.Message); }   // full message: the call log says which selector was not found (the dispatcher cuts it to 1000 characters)
         finally { _gate.Release(); }
     }
+
+    /// <summary>
+    /// READ-ONLY probe (18 Nov): opens a chat, opens the attach menu, lists the file inputs and the menu items, then closes the menu. Sends nothing.
+    /// Used to find the real selectors for SendGroupMediaAsync.
+    /// </summary>
+    public async Task<object> AttachProbeAsync(string groupName)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var p = _page;
+            if (p == null || p.IsClosed || !await ChatListVisibleAsync(p)) return new { error = "Not linked: connect first." };
+            await OpenChatAsync(p, groupName);
+            await p.Locator("footer div[contenteditable='true']").First.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
+
+            var footerBefore = await p.EvaluateAsync<string[]>(@"() => [...document.querySelectorAll('footer [data-icon], footer button, footer [role=button]')].slice(0, 40).map(e => e.tagName + ' icon=' + (e.getAttribute('data-icon') || '-') + ' aria=' + (e.getAttribute('aria-label') || '-') + ' title=' + (e.getAttribute('title') || '-'))");
+
+            var clicked = "none";
+            foreach (var sel in new[] { "footer [data-icon='plus']", "footer [data-icon='attach-menu-plus']", "footer [data-icon='clip']", "footer button[title='Attach']", "footer [aria-label='Attach']" })
+            {
+                var loc = p.Locator(sel).First;
+                if (await loc.CountAsync() == 0) continue;
+                try { await loc.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 3000 }); clicked = sel; break; }
+                catch { }
+            }
+            await Task.Delay(1200);
+
+            var inputs = await p.EvaluateAsync<string[]>(@"() => [...document.querySelectorAll('input[type=file]')].map(i => 'accept=' + (i.getAttribute('accept') || '(none)') + ' multiple=' + i.multiple + ' inMain=' + !!i.closest('#main') + ' visible=' + (i.offsetParent !== null))");
+            var menuItems = await p.EvaluateAsync<string[]>(@"() => [...document.querySelectorAll('[data-icon], [aria-label], [title]')].filter(e => e.offsetParent !== null && /document|image|camera|contact|poll|sticker|photo|video|audio|attach|file/i.test((e.getAttribute('data-icon') || '') + ' ' + (e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || ''))).slice(0, 40).map(e => e.tagName + ' icon=' + (e.getAttribute('data-icon') || '-') + ' aria=' + (e.getAttribute('aria-label') || '-') + ' title=' + (e.getAttribute('title') || '-') + ' text=' + (e.innerText || '').slice(0, 30).replace(/\s+/g, ' '))");
+
+            await p.Keyboard.PressAsync("Escape");
+            await Task.Delay(300);
+            await p.Keyboard.PressAsync("Escape");
+            await ClearSearchAsync(p);
+            return new { clicked, footerBefore, inputs, menuItems };
+        }
+        catch (Exception ex) { return new { error = ex.Message.Split('\n')[0] }; }
+        finally { _gate.Release(); }
+    }
+
+    // what a message node holds, read from the page (used by the chat probe and by the delivery check after sending a file)
+    private const string LastMessagesJs = @"(n) => [...document.querySelectorAll('#main div[data-id]')].slice(-n).map(m => { const t = m.querySelector('span.selectable-text'); const out = !!m.querySelector(""[data-icon='tail-out']"") || [...m.querySelectorAll('[aria-label]')].some(a => /^(You:|Delivered|Read|Sent|Pending)\s*$/.test(a.getAttribute('aria-label'))) || !!m.querySelector(""[data-icon='msg-check'],[data-icon='msg-dblcheck'],[data-icon='msg-time']""); return { id: m.getAttribute('data-id'), dir: out ? 'out' : 'in', audio: !!m.querySelector(""audio,[data-icon*='audio'],[aria-label*='voice' i],[aria-label^='Play' i]""), image: !!m.querySelector(""img[src^='blob:']""), video: !!m.querySelector(""video,[data-icon*='video'],[data-icon='media-play']""), text: t ? t.innerText.slice(0, 80) : null, icons: [...m.querySelectorAll('[data-icon]')].map(i => i.getAttribute('data-icon')).slice(0, 8).join(',') }; })";
+    private sealed class NodeInfo { public string id { get; set; } public string dir { get; set; } public bool audio { get; set; } public bool image { get; set; } public bool video { get; set; } public string text { get; set; } public string icons { get; set; } }
+
+    /// <summary>READ-ONLY: the last messages of a chat (direction, audio/image/video, text) and whether a file preview is still open. Sends nothing.</summary>
+    public async Task<object> ChatProbeAsync(string groupName, int last = 10)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var p = _page;
+            if (p == null || p.IsClosed || !await ChatListVisibleAsync(p)) return new { error = "Not linked: connect first." };
+            var previewOpen = await p.Locator("[aria-label='Remove attachment']").CountAsync() > 0;
+            if (!previewOpen) await OpenChatAsync(p, groupName);
+            await Task.Delay(1500);
+            var nodes = await p.EvaluateAsync<NodeInfo[]>(LastMessagesJs, last);
+            if (!previewOpen) await ClearSearchAsync(p);
+            return new { previewOpen, nodes };
+        }
+        catch (Exception ex) { return new { error = ex.Message.Split('\n')[0] }; }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// Stages a file in the preview, lists the caption box and send buttons it finds, then removes the file with "Remove attachment". Sends nothing.
+    /// Used to find the real selectors of the preview screen.
+    /// </summary>
+    public async Task<object> PreviewProbeAsync(string groupName, string filePath, string mimeType)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var p = _page;
+            if (p == null || p.IsClosed || !await ChatListVisibleAsync(p)) return new { error = "Not linked: connect first." };
+            var leftover = p.Locator("[aria-label='Remove attachment']");
+            if (await leftover.CountAsync() > 0) { await leftover.First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 4000 }); await Task.Delay(700); }
+            await OpenChatAsync(p, groupName);
+            await p.Locator("footer div[contenteditable='true']").First.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
+            await p.Locator("footer button[aria-label='Attach']").First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 });
+            await Task.Delay(700);
+            var item = MenuItemFor(mimeType);
+            var chooser = await p.RunAndWaitForFileChooserAsync(
+                () => p.Locator($"button[aria-label='{item}']").First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 }),
+                new Microsoft.Playwright.PageRunAndWaitForFileChooserOptions { Timeout = 8000 });
+            await chooser.SetFilesAsync(filePath);
+            await Task.Delay(2500);
+
+            var editables = await p.EvaluateAsync<string[]>(@"() => [...document.querySelectorAll('[contenteditable=true]')].map(e => 'aria=' + (e.getAttribute('aria-label') || '-') + ' tab=' + (e.getAttribute('data-tab') || '-') + ' inFooter=' + !!e.closest('footer') + ' inMain=' + !!e.closest('#main') + ' visible=' + (e.offsetParent !== null) + ' text=' + (e.innerText || '').slice(0, 20))");
+            var sends = await p.EvaluateAsync<string[]>(@"() => [...document.querySelectorAll(""[data-icon*='send'], [aria-label='Send'], [aria-label*='Send' i]"")].map(e => { const b = e.getBoundingClientRect(); const btn = e.closest('button,[role=button]'); return e.tagName + ' icon=' + (e.getAttribute('data-icon') || '-') + ' aria=' + (e.getAttribute('aria-label') || '-') + ' btnAria=' + (btn ? (btn.getAttribute('aria-label') || '-') : 'none') + ' inFooter=' + !!e.closest('footer') + ' visible=' + (e.offsetParent !== null) + ' x=' + Math.round(b.x) + ' y=' + Math.round(b.y); })");
+            var removed = false;
+            if (await leftover.CountAsync() > 0) { await leftover.First.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 4000 }); removed = true; await Task.Delay(700); }
+            var stillOpen = await leftover.CountAsync() > 0;
+            await ClearSearchAsync(p);
+            return new { item, editables, sends, removed, stillOpen };
+        }
+        catch (Exception ex) { return new { error = ex.Message.Split('\n')[0] }; }
+        finally { _gate.Release(); }
+    }
+
+    // clicks "Attach" and waits for the menu item; clicks "Attach" once more when the menu did not open
+    private static async Task OpenAttachMenuAsync(Microsoft.Playwright.IPage p, string item)
+    {
+        var attach = p.Locator("footer button[aria-label='Attach']").First;
+        var wanted = p.Locator($"button[aria-label='{item}']").First;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await attach.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 });
+            try
+            {
+                await wanted.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { State = Microsoft.Playwright.WaitForSelectorState.Visible, Timeout = 4000 });
+                return;
+            }
+            catch (TimeoutException) { await Task.Delay(500); }   // the menu did not open (or closed again): try once more
+        }
+        throw new TimeoutException($"The attach menu did not show '{item}' after two tries.");
+    }
+
+    // types text into the focused box; Shift+Enter keeps line breaks inside one message
+    private static async Task TypeLinesAsync(Microsoft.Playwright.IPage p, string text)
+    {
+        var lines = text.Replace("\r", "").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (i > 0) await p.Keyboard.PressAsync("Shift+Enter");
+            await p.Keyboard.TypeAsync(lines[i], new Microsoft.Playwright.KeyboardTypeOptions { Delay = 15 });
+        }
+    }
+
+    // attach-menu item per file type (seen on the live page 18 Nov: "Audio", "Photos & videos", "Document")
+    private static string MenuItemFor(string mimeType) =>
+        mimeType != null && mimeType.StartsWith("audio/") ? "Audio"
+        : mimeType != null && (mimeType.StartsWith("video/") || mimeType.StartsWith("image/")) ? "Photos & videos"
+        : "Document";
 
     /// <summary>Lab diagnostics: the editable fields and the main containers of the page, and a screenshot saved next to the session folder.</summary>
     public async Task<object> DebugAsync()

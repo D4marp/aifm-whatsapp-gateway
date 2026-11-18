@@ -146,6 +146,7 @@ api.MapPost("/messages", async (SendRequest r, IWhatsAppSessionUseCase sessions,
     }
     catch (MediaRejectedException ex) { return Results.BadRequest(new { error = ex.Message }); }
     catch (GroupNotAllowedException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (DuplicateMessageException ex) { return Results.Conflict(new { error = ex.Message }); }
 });
 
 // ---- media: upload a file once (audio, video, image), then send it with POST /messages {mediaId}; received files come back the same way
@@ -213,6 +214,25 @@ async Task<IResult> Control(Guid? sessionId, IWhatsAppSessionUseCase sessions, I
 api.MapPost("/connection/connect", (Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry, CancellationToken ct) => Control(sessionId, sessions, registry, c => c.ConnectAsync(ct)));
 api.MapPost("/connection/disconnect", (Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry, CancellationToken ct) => Control(sessionId, sessions, registry, c => c.DisconnectAsync(ct)));
 api.MapPost("/connection/reset", (Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry, CancellationToken ct) => Control(sessionId, sessions, registry, c => c.ResetSessionAsync(ct)));
+// READ-ONLY: shows the attach menu of a chat (sends nothing). For fixing the file-send selectors.
+api.MapGet("/real/attach-probe", async (string groupName, Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry) =>
+{
+    var (session, err) = await Sess(sessions, sessionId); if (err != null) return err;
+    return registry.Get(session) is RealWhatsAppClient r ? Results.Ok(await r.AttachProbeAsync(groupName)) : Results.BadRequest(new { error = "Only with the Real client." });
+});
+// READ-ONLY: last messages of a chat (direction, audio/image/video, text) and whether a preview is still open
+api.MapGet("/real/chat-probe", async (string groupName, Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry) =>
+{
+    var (session, err) = await Sess(sessions, sessionId); if (err != null) return err;
+    return registry.Get(session) is RealWhatsAppClient r ? Results.Ok(await r.ChatProbeAsync(groupName)) : Results.BadRequest(new { error = "Only with the Real client." });
+});
+// stages an uploaded file in the preview, lists caption box and send buttons, then removes it again. Sends nothing.
+api.MapGet("/real/preview-probe", async (string groupName, Guid mediaId, Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry, IWhatsAppMediaUseCase media) =>
+{
+    var (session, err) = await Sess(sessions, sessionId); if (err != null) return err;
+    var m = await media.GetAsync(mediaId); if (m == null) return Results.NotFound(new { error = "Unknown media id." });
+    return registry.Get(session) is RealWhatsAppClient r ? Results.Ok(await r.PreviewProbeAsync(groupName, media.FullPath(m), m.MimeType)) : Results.BadRequest(new { error = "Only with the Real client." });
+});
 api.MapGet("/real/debug", async (Guid? sessionId, IWhatsAppSessionUseCase sessions, IWhatsAppClientRegistry registry) =>
 {
     var (session, err) = await Sess(sessions, sessionId); if (err != null) return err;

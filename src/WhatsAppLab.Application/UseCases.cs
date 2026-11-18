@@ -134,6 +134,7 @@ public class WhatsAppGroupUseCase : IWhatsAppGroupUseCase
 }
 
 public class GroupNotAllowedException : Exception { public GroupNotAllowedException(string message) : base(message) { } }
+public class DuplicateMessageException : Exception { public DuplicateMessageException(string message) : base(message) { } }
 
 public class MediaOptions
 {
@@ -215,6 +216,9 @@ public class WhatsAppMediaUseCase : IWhatsAppMediaUseCase
 public class WhatsAppOutboxUseCase : IWhatsAppOutboxUseCase
 {
     private const int MaxAttempts = 3;
+    /// <summary>How long the same text or file to the same group is refused (anti-spam against double clicks and copy-paste loops).</summary>
+    public static readonly TimeSpan DuplicateWindow = TimeSpan.FromMinutes(2);
+    private static readonly ConcurrentDictionary<string, DateTime> _recentQueued = new();
     // the random part of the gap after the last send, per number (kept in memory: after a restart the minimum gap from the database still applies)
     private static readonly ConcurrentDictionary<Guid, DateTime> _nextAllowedUtc = new();
     private readonly IApplicationDbContext _db;
@@ -236,10 +240,21 @@ public class WhatsAppOutboxUseCase : IWhatsAppOutboxUseCase
             if (media == null) throw new MediaRejectedException("Unknown media id.");
             type = media.Kind;
         }
+        var text = MessageText.Render(body ?? "");   // {time}, {rand}, {a|b} ... become the real text here
+
+        // anti-spam: the same text (or the same file) to the same group of the same number is refused for DuplicateWindow.
+        // On 16 Nov repeated clicks queued one text many times; a template with {time} or {rand} still passes because its text differs.
+        var key = $"{sessionId}|{groupJid}|{text}|{mediaId}";
+        var now = DateTime.UtcNow;
+        foreach (var old in _recentQueued.Where(k => now - k.Value > DuplicateWindow).Select(k => k.Key).ToList()) _recentQueued.TryRemove(old, out _);
+        if (_recentQueued.TryGetValue(key, out var at) && now - at < DuplicateWindow)
+            throw new DuplicateMessageException($"The same message was queued for this group {(int)(now - at).TotalSeconds} s ago. Wait {(int)DuplicateWindow.TotalSeconds} s or change the text (a {{time}} or {{rand}} token makes each message different).");
+        _recentQueued[key] = now;
+
         var row = new WhatsAppOutboundMessage
         {
             MediaId = mediaId, MessageType = type,
-            Id = Guid.NewGuid(), SessionId = sessionId, GroupJid = groupJid, Body = MessageText.Render(body ?? ""),   // {time}, {rand}, {a|b} ... become the real text here
+            Id = Guid.NewGuid(), SessionId = sessionId, GroupJid = groupJid, Body = text,
             ScheduledFor = scheduledFor ?? DateTime.UtcNow, Status = (int)OutboundStatus.Pending,
             Source = (int)source, SourceReference = sourceReference, CorrelationId = Guid.NewGuid().ToString("N")
         };

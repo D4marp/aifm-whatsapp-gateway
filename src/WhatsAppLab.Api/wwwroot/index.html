@@ -104,7 +104,7 @@
     <label>File (optional): audio, video or image. The text above becomes its caption.</label>
     <input type="file" id="sendFile" accept="audio/*,video/*,image/*,.mp3,.m4a,.aac,.ogg,.opus,.wav,.amr,.mp4,.mov,.webm,.3gp,.mkv">
     <label>Scheduled for (optional, your local time)</label><input id="sendWhen" type="datetime-local">
-    <button onclick="queueMessage()">Queue message</button>
+    <button onclick="queueMessage(this)">Queue message</button>
     <button class="alt" onclick="syncGroups(this)">Sync chats / groups</button>
     <div class="note" style="margin-top:6px">The message goes into the outbox; the background worker sends it when Enabled is on, the hours, wave and daily limits allow. Until then it stays <b class="s0">Pending</b>.</div>
   </section>
@@ -228,22 +228,26 @@ async function saveAllowed() {
   try { await call('PUT', '/groups/allowed', { groupJids: jids }); log(jids.length ? 'Allowed groups: ' + jids.length : 'Allow-list cleared (no restriction)'); } catch (e) { log('ERROR ' + e.message); }
   refresh();
 }
-async function queueMessage() {
-  const w = $('sendWhen').value;
-  const body = { groupName: $('sendGroup').value, body: $('sendBody').value };
-  if (w) body.scheduledFor = new Date(w).toISOString();
-  const f = $('sendFile').files[0];
-  if (f) {   // upload the file first (audio, video or image), then queue the message that points to it
-    try {
+async function queueMessage(btn) {
+  // anti-spam on the page: the button is locked until this message is queued, so a double click cannot queue it twice
+  if (btn) { if (btn.disabled) return; btn.disabled = true; btn.textContent = 'Queueing...'; }
+  try {
+    const w = $('sendWhen').value;
+    const body = { groupName: $('sendGroup').value, body: $('sendBody').value };
+    if (w) body.scheduledFor = new Date(w).toISOString();
+    const f = $('sendFile').files[0];
+    if (f) {   // upload the file first (audio, video or image), then queue the message that points to it
+      if (btn) btn.textContent = 'Uploading...';
       const fd = new FormData(); fd.append('file', f);
       const r = await fetch(B + '/media' + (SID ? '?sessionId=' + SID : ''), { method: 'POST', body: fd });
       const j = await r.json();
       if (!r.ok) { log('ERROR upload: ' + (j.error || r.status)); return; }
       body.mediaId = j.id; log('Uploaded ' + j.name + ' (' + j.kind + ', ' + j.size + ' bytes)');
-    } catch (e) { log('ERROR upload: ' + e.message); return; }
-    $('sendFile').value = '';
-  }
-  post('/messages', body);
+      $('sendFile').value = '';
+    }
+    await post('/messages', body);
+  } catch (e) { log('ERROR ' + e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = 'Queue message'; } }
 }
 async function removeAnnouncement() { try { await call('DELETE', '/announcements/' + $('anId').value); log('Deleted ' + $('anId').value); } catch (e) { log('ERROR ' + e.message); } }
 function createAnnouncement() { post('/announcements', { id: $('anId').value, groupName: $('sendGroup').value, body: $('sendBody').value, cron: $('anCron').value }); }
