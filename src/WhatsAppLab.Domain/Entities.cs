@@ -26,6 +26,11 @@ public enum InboundProcessStatus { New = 0, Processed = 1, Ignored = 2 }
 /// <summary>The linked WhatsApp number and its session. SessionData must be encrypted in a real system (the key is outside the database).</summary>
 public class WhatsAppSession : Entity
 {
+    /// <summary>Label shown in the admin page, e.g. "Sales number".</summary>
+    public string Name { get; set; }
+    /// <summary>Folder name of this number's browser profile (its login). The first session keeps "edge-profile", the folder the single-number POC already used.</summary>
+    public string ProfileKey { get; set; }
+    public bool IsActive { get; set; } = true;
     public string PhoneNumber { get; set; }
     public int Status { get; set; }
     public byte[] SessionData { get; set; }
@@ -43,11 +48,41 @@ public class WhatsAppGroup : Entity
     public int ParticipantCount { get; set; }
     public DateTime LastSyncedOn { get; set; }
     public bool IsActive { get; set; } = true;
+    /// <summary>
+    /// The allow-list. While NO group of a number is marked allowed, nothing is restricted (how the single-number POC worked).
+    /// As soon as at least one is allowed, only allowed groups can be sent to, and only allowed groups are read when receiving.
+    /// </summary>
+    public bool IsAllowed { get; set; }
+}
+
+/// <summary>
+/// A file of a message (audio, video, image, other). The bytes live in a file on disk, outside the database; the row keeps what is needed to find and check it.
+/// Direction 0 = to send (uploaded through the API), 1 = received (saved by the receive loop).
+/// </summary>
+public class WhatsAppMedia : Entity
+{
+    public Guid? SessionId { get; set; }
+    public int Direction { get; set; }
+    /// <summary>audio, video, image or file.</summary>
+    public string Kind { get; set; }
+    public string MimeType { get; set; }
+    public string FileName { get; set; }
+    public long SizeBytes { get; set; }
+    /// <summary>SHA-256 of the file, lower-case hex. Lets a test compare what was stored with the original.</summary>
+    public string Sha256 { get; set; }
+    /// <summary>Path of the stored file, relative to the media root (never an absolute path, so the root can move).</summary>
+    public string StoragePath { get; set; }
 }
 
 /// <summary>The outbox: one row is one message. API, SQL Server and schedule all write here; the dispatcher sends.</summary>
 public class WhatsAppOutboundMessage : Entity
 {
+    /// <summary>When set, the message is a file; Body is then the caption (can be empty).</summary>
+    public Guid? MediaId { get; set; }
+    /// <summary>text, audio, video, image or file.</summary>
+    public string MessageType { get; set; } = "text";
+    /// <summary>The number (session) that sends this message. Null only on rows from before several numbers existed; they are moved to the first session at startup.</summary>
+    public Guid? SessionId { get; set; }
     public string GroupJid { get; set; }
     public string Body { get; set; }
     public DateTime ScheduledFor { get; set; }
@@ -63,6 +98,8 @@ public class WhatsAppOutboundMessage : Entity
 /// <summary>A group message that was received. Holds personal data (sender, text), so keep only what is needed.</summary>
 public class WhatsAppInboundMessage : Entity
 {
+    public Guid? MediaId { get; set; }
+    public Guid? SessionId { get; set; }
     public string GroupJid { get; set; }
     public string SenderJid { get; set; }
     public string SenderName { get; set; }
@@ -76,6 +113,8 @@ public class WhatsAppInboundMessage : Entity
 /// <summary>One row of settings. No row = feature Off (same idea as FaceVerificationSettingDbSet in the ERP).</summary>
 public class WhatsAppSetting : Entity
 {
+    /// <summary>Settings (on/off, pacing, receive) belong to one number. Null only on the row from before several numbers existed.</summary>
+    public Guid? SessionId { get; set; }
     public bool IsEnabled { get; set; }
     public int? MaxMessagesPerDay { get; set; }
     public int MinSecondsBetweenMessages { get; set; } = 5;

@@ -15,3 +15,7 @@ scripts/*-err.txt
 # the WhatsApp login (browser profile) lives outside the project; never add it here
 edge-profile/
 session/
+
+# local backups of real data and per-user IDE files
+backups/
+*.csproj.user

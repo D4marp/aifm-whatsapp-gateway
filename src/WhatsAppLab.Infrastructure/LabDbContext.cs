@@ -15,6 +15,7 @@ public class LabDbContext : DbContext, IApplicationDbContext
     public DbSet<WhatsAppOutboundMessage> WhatsAppOutboundMessageDbSet { get; set; }
     public DbSet<WhatsAppInboundMessage> WhatsAppInboundMessageDbSet { get; set; }
     public DbSet<WhatsAppSetting> WhatsAppSettingDbSet { get; set; }
+    public DbSet<WhatsAppMedia> WhatsAppMediaDbSet { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

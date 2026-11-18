@@ -39,6 +39,7 @@
 <body>
 <header>
   <h1>WhatsApp Lab Dashboard</h1>
+  <span>Number: <select id="sessSel" onchange="changeSession()" style="width:auto"></select> <button class="alt" onclick="addNumber()">Add number</button></span>
   <span class="note" id="modeNote"></span>
   <span><a href="/swagger" target="_blank">Swagger</a> · <a href="/hangfire" target="_blank">Hangfire</a></span>
 </header>
@@ -89,10 +90,22 @@
   <section>
     <h2>3. Send a message (trigger: API)</h2>
     <label>Group</label><select id="sendGroup"></select>
-    <label>Text</label><textarea id="sendBody">Test from the dashboard</textarea>
+    <label>Message template (pick one, or write your own below)</label>
+    <select id="tplSel" onchange="pickTemplate()">
+      <option value="">Write my own</option>
+      <option>Test message {time}</option>
+      <option>{Hello|Hi|Hey}, this is a test message sent at {datetime}</option>
+      <option>Connection check {time}, ref {rand}</option>
+      <option>{Testing|Quick test|Just checking} the gateway at {time}</option>
+      <option>{Good morning|Good afternoon|Hello} team, test #{rand} ({date} {time})</option>
+    </select>
+    <label>Text</label><textarea id="sendBody">Test message {time}</textarea>
+    <div class="note">Tokens: <code>{time}</code> <code>{date}</code> <code>{datetime}</code> <code>{rand}</code> <code>{one|two|three}</code> (one option at random). They are filled in when the message is queued, and again on every run of a recurring announcement, so no two messages are the same. <a href="#" onclick="previewText(); return false;">Preview</a> <span id="previewOut" class="note"></span></div>
+    <label>File (optional): audio, video or image. The text above becomes its caption.</label>
+    <input type="file" id="sendFile" accept="audio/*,video/*,image/*,.mp3,.m4a,.aac,.ogg,.opus,.wav,.amr,.mp4,.mov,.webm,.3gp,.mkv">
     <label>Scheduled for (optional, your local time)</label><input id="sendWhen" type="datetime-local">
     <button onclick="queueMessage()">Queue message</button>
-    <button class="alt" onclick="post('/groups/sync')">Sync chats / groups</button>
+    <button class="alt" onclick="syncGroups(this)">Sync chats / groups</button>
     <div class="note" style="margin-top:6px">The message goes into the outbox; the background worker sends it when Enabled is on, the hours, wave and daily limits allow. Until then it stays <b class="s0">Pending</b>.</div>
   </section>
 
@@ -118,14 +131,35 @@ const STATUS = ['Pending', 'Sent', 'Failed'];
 const PROC = ['New', 'Processed', 'Failed'];
 const CONN = { disconnected:'Not connected', loading:'Loading...', qr:'Waiting for QR scan', linked:'Linked', fake:'Fake client (always linked)' };
 function log(t) { $('log').textContent = new Date().toLocaleTimeString() + '  ' + t + '\n' + $('log').textContent; }
+// The number (session) this page works on. Every call except the list of numbers carries it, so each number keeps its own login, settings, groups, outbox and inbox.
+let SID = null;
 async function call(method, path, body) {
+  if (SID && !path.startsWith('/sessions') && !path.startsWith('/announcements/')) {
+    if (body && (path === '/messages' || path === '/announcements')) body = { ...body, sessionId: SID };
+    path += (path.includes('?') ? '&' : '?') + 'sessionId=' + SID;
+  }
   const r = await fetch(B + path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const txt = await r.text();
   if (!r.ok) throw new Error(r.status + ' ' + txt);
   try { return JSON.parse(txt); } catch { return txt; }
 }
 async function post(path, body) { try { await call('POST', path, body); log('OK ' + path); } catch (e) { log('ERROR ' + path + ' ' + e.message); } refresh(); }
-async function conn(action) { log(action + '...'); await post('/connection/' + action); }
+// A connect/disconnect can take many seconds (it starts or closes the browser): show the state at once, poll every second meanwhile.
+let acting = null;
+function showActing() { if (!acting) return; $('pill').textContent = acting; $('pill').className = 'pill loading'; $('bConnect').disabled = true; $('bDisc').disabled = true; }
+async function conn(action) {
+  acting = { connect: 'Connecting...', disconnect: 'Disconnecting...', reset: 'Forgetting login...' }[action] || 'Working...';
+  showActing(); log(action + '...');
+  const poll = setInterval(refresh, 1000);
+  await post('/connection/' + action);
+  clearInterval(poll); acting = null; refresh();
+}
+async function syncGroups(btn) {
+  const t = btn.textContent; btn.disabled = true; btn.textContent = 'Syncing...';
+  const poll = setInterval(refresh, 2000);
+  await post('/groups/sync');
+  clearInterval(poll); btn.disabled = false; btn.textContent = t;
+}
 async function resetSession() { if (confirm('Delete the saved WhatsApp login? The next Connect needs a new QR scan.')) await conn('reset'); }
 function table(rows, cols) {
   if (!rows || !rows.length) return '<span class="note">Nothing yet.</span>';
@@ -136,7 +170,7 @@ let busy = false;
 async function refresh() {
   if (busy) return; busy = true;
   try {
-    const s = await call('GET', '/status');
+    const [s, gAll, m, i] = await Promise.all([call('GET', '/status'), call('GET', '/groups'), call('GET', '/messages'), call('GET', '/inbound')]);
     const c = s.connection;
     $('pill').className = 'pill ' + (c === 'fake' ? 'linked' : c); $('pill').textContent = CONN[c] ?? c;
     $('clientline').textContent = ''; $('clientline').title = s.client;   // the technical name is not needed on screen
@@ -147,18 +181,21 @@ async function refresh() {
     if (!s.linked && s.qr) $('qrimg').src = s.qr;
     $('waitbox').style.display = (c === 'loading' && !s.qr) ? 'block' : 'none';
     $('stats').innerHTML = [['Enabled', s.enabled ? 'On' : 'Off'], ['Pending', s.pending], ['Sent', s.sent], ['Failed', s.failed]].map(x => '<div class="stat"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
-    const g = (await call('GET', '/groups')).filter(x => x.isActive !== false);   // rows that were not seen in the last sync are hidden
+    showActing();
+    const g = gAll.filter(x => x.isActive !== false);   // rows that were not seen in the last sync are hidden
     const cur = $('sendGroup').value;
-    $('sendGroup').innerHTML = g.map(x => '<option>' + esc(x.name) + '</option>').join('');
+    const anyAllowed = g.some(x => x.isAllowed);
+    // once any group is allowed, only those can be chosen to send to (the server refuses the others anyway)
+    $('sendGroup').innerHTML = g.filter(x => !anyAllowed || x.isAllowed).map(x => '<option>' + esc(x.name) + '</option>').join('');
     if (cur) $('sendGroup').value = cur;
-    $('groups').innerHTML = table(g, [['Name', r => esc(r.name)], ['Members', r => esc(pick(r, 'participantCount', 'members'))], ['Id', r => esc(pick(r, 'groupJid', 'jid', 'id'))]]);
-    const m = await call('GET', '/messages');
+    if (!document.activeElement || document.activeElement.type !== 'checkbox' || !$('groups').contains(document.activeElement))   // do not redraw under a checkbox that is being clicked
+      $('groups').innerHTML = (anyAllowed ? '<div class="note">Only the ticked groups can be sent to and read. Untick all to remove the restriction.</div>' : '<div class="note">No group is ticked, so nothing is restricted. Tick the groups this number may use.</div>')
+        + table(g, [['Allowed', r => '<input type="checkbox" class="allowBox" data-jid="' + esc(r.groupJid) + '"' + (r.isAllowed ? ' checked' : '') + ' onchange="saveAllowed()">'], ['Name', r => esc(r.name)], ['Members', r => esc(pick(r, 'participantCount', 'members'))], ['Id', r => esc(pick(r, 'groupJid', 'jid', 'id'))]]);
     $('outbox').innerHTML = table(m, [
       ['Status', r => '<b class="s' + r.status + '">' + (STATUS[r.status] ?? r.status) + '</b>'],
       ['Text', r => esc(r.body)], ['Group', r => esc(pick(r, 'groupName', 'groupJid'))],
       ['Source', r => ['Api', 'SqlTrigger', 'Scheduled'][r.source] ?? r.source], ['Attempts', r => esc(r.attempts)],
       ['Scheduled (UTC)', r => esc(pick(r, 'scheduledFor'))], ['Sent (UTC)', r => esc(pick(r, 'sentOn', 'sentAt'))], ['Error', r => esc(pick(r, 'errorMessage'))]]);
-    const i = await call('GET', '/inbound');
     $('inbound').innerHTML = table(i, [['Sender', r => esc(pick(r, 'sender', 'from', 'senderName'))], ['Text', r => esc(r.body)], ['State', r => esc(PROC[r.processStatus] ?? r.processStatus)]]);
   } catch (e) { log('Cannot reach the API: ' + e.message); }
   busy = false;
@@ -181,15 +218,52 @@ async function saveSettings() {
   } catch (e) { log('ERROR settings ' + e.message); }
   refresh();
 }
-function queueMessage() {
+function pickTemplate() { const v = $('tplSel').value; if (v) { $('sendBody').value = v; previewText(); } }   // the box stays editable: a template is only a starting point
+async function previewText() {
+  try { const r = await call('POST', '/messages/preview', { body: $('sendBody').value }); $('previewOut').textContent = '→ ' + r.text; }
+  catch (e) { $('previewOut').textContent = 'preview failed: ' + e.message; }
+}
+async function saveAllowed() {
+  const jids = [...document.querySelectorAll('.allowBox:checked')].map(b => b.dataset.jid);
+  try { await call('PUT', '/groups/allowed', { groupJids: jids }); log(jids.length ? 'Allowed groups: ' + jids.length : 'Allow-list cleared (no restriction)'); } catch (e) { log('ERROR ' + e.message); }
+  refresh();
+}
+async function queueMessage() {
   const w = $('sendWhen').value;
   const body = { groupName: $('sendGroup').value, body: $('sendBody').value };
   if (w) body.scheduledFor = new Date(w).toISOString();
+  const f = $('sendFile').files[0];
+  if (f) {   // upload the file first (audio, video or image), then queue the message that points to it
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const r = await fetch(B + '/media' + (SID ? '?sessionId=' + SID : ''), { method: 'POST', body: fd });
+      const j = await r.json();
+      if (!r.ok) { log('ERROR upload: ' + (j.error || r.status)); return; }
+      body.mediaId = j.id; log('Uploaded ' + j.name + ' (' + j.kind + ', ' + j.size + ' bytes)');
+    } catch (e) { log('ERROR upload: ' + e.message); return; }
+    $('sendFile').value = '';
+  }
   post('/messages', body);
 }
 async function removeAnnouncement() { try { await call('DELETE', '/announcements/' + $('anId').value); log('Deleted ' + $('anId').value); } catch (e) { log('ERROR ' + e.message); } }
 function createAnnouncement() { post('/announcements', { id: $('anId').value, groupName: $('sendGroup').value, body: $('sendBody').value, cron: $('anCron').value }); }
-loadSettings(); refresh();
+async function loadSessions() {
+  try {
+    const list = await call('GET', '/sessions');
+    if (!SID || !list.some(s => s.id === SID)) SID = list.length ? list[0].id : null;
+    $('sessSel').innerHTML = list.map(s => '<option value="' + s.id + '">' + esc(s.name) + ' (' + esc(CONN[s.connection] ?? s.connection) + (s.phone && s.phone !== '(linked)' ? ', ' + esc(s.phone) : '') + ')</option>').join('');
+    if (SID) $('sessSel').value = SID;
+  } catch (e) { log('Cannot load the numbers: ' + e.message); }
+}
+async function changeSession() { SID = $('sessSel').value; $('log').textContent = ''; await loadSettings(); refresh(); }
+async function addNumber() {
+  const name = prompt('Name of the new number (for example: Sales number). It starts Off; connect it and scan its QR.');
+  if (!name) return;
+  try { const r = await call('POST', '/sessions', { name }); SID = r.id; log('Number added: ' + name); await loadSessions(); await loadSettings(); refresh(); }
+  catch (e) { log('ERROR ' + e.message); }
+}
+loadSessions().then(() => { loadSettings(); refresh(); });
+setInterval(() => { if ($('auto').checked) loadSessions(); }, 5000);   // keeps the names and connection states in the list current
 setInterval(() => { if ($('auto').checked) refresh(); }, 3000);
 </script>
 </body>

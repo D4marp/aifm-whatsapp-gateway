@@ -1,59 +1,110 @@
-# Test the lab API (Fake WhatsApp client). Run the API first:
+# Examples for every endpoint of the WhatsApp gateway lab. Start the API first:
 #   dotnet run --project src\WhatsAppLab.Api --urls http://localhost:5300
 # Open this file in VS Code (REST Client) or Visual Studio and click "Send Request". Swagger: http://localhost:5300/swagger
+# With the Real client these calls touch real WhatsApp: use a number you can afford to lose and only your own test groups.
+# Every call works on ONE number: add ?sessionId=... (or "sessionId" in the body). Without it the first number is used.
 
 @base = http://localhost:5300/api/whatsapp
+@session = put-a-session-id-here
+@media = put-a-media-id-here
 
-### 1. Status (feature is Off by default)
-GET {{base}}/status
+### --- numbers (sessions)
+GET {{base}}/sessions
 
-### 2. Switch the feature on (limits: 100 per day, 1 second between messages)
-PUT {{base}}/settings
+### Add a number (starts Off; connect it and scan its QR)
+POST {{base}}/sessions
 Content-Type: application/json
 
-{ "isEnabled": true, "maxMessagesPerDay": 100, "minSecondsBetweenMessages": 1, "receiveEnabled": true }
+{ "name": "Test number" }
 
-### 3. Sync groups of the linked number, then list them
-POST {{base}}/groups/sync
+### Status of one number (the QR appears here while waiting for a scan)
+GET {{base}}/status?sessionId={{session}}
+
+### Login: connect (shows the QR), disconnect (keeps the login)
+POST {{base}}/connection/connect?sessionId={{session}}
 
 ###
-GET {{base}}/groups
+POST {{base}}/connection/disconnect?sessionId={{session}}
 
-### 4. Trigger by API: queue a message to a group (sent by the background worker)
+### --- settings of one number (no row = Off)
+GET {{base}}/settings?sessionId={{session}}
+
+### Safe preset: about 10-15 a day, waves of 3 per 90 minutes, office hours only
+PUT {{base}}/settings?sessionId={{session}}
+Content-Type: application/json
+
+{ "isEnabled": true, "maxMessagesPerDay": 15, "minSecondsBetweenMessages": 30, "jitterSeconds": 60, "sendFromHour": 8, "sendToHour": 18, "maxPerWindow": 3, "windowMinutes": 90, "receiveEnabled": false }
+
+### --- groups
+POST {{base}}/groups/sync?sessionId={{session}}
+
+###
+GET {{base}}/groups?sessionId={{session}}
+
+### Allow-list: only these groups may be sent to and read. An empty list removes the restriction.
+PUT {{base}}/groups/allowed?sessionId={{session}}
+Content-Type: application/json
+
+{ "groupJids": [ "chat:Advancer Wa test", "chat:IT Team Batam" ] }
+
+### --- messages
+### Preview a template (nothing is queued)
+POST {{base}}/messages/preview
+Content-Type: application/json
+
+{ "body": "{Hello|Hi} team, test #{rand} at {datetime}" }
+
+### Queue a text message (tokens are filled in when it is queued)
 POST {{base}}/messages
 Content-Type: application/json
 
-{ "groupName": "IT Batam", "body": "Test from the API" }
+{ "sessionId": "{{session}}", "groupName": "Advancer Wa test", "body": "Test message {time}" }
 
-### 5. Scheduled: sent only when the time is due (UTC)
+### Queue a scheduled message (time in UTC)
 POST {{base}}/messages
 Content-Type: application/json
 
-{ "groupName": "IT Batam", "body": "Scheduled test", "scheduledFor": "2026-11-14T08:00:00Z" }
+{ "sessionId": "{{session}}", "groupName": "Advancer Wa test", "body": "Scheduled test {time}", "scheduledFor": "2026-11-18T03:00:00Z" }
 
-### 6. See the outbox (status 0 Pending, 1 Sent, 2 Failed)
-GET {{base}}/messages
+###
+GET {{base}}/messages?sessionId={{session}}
 
-### 7. Recurring announcement (Hangfire), then run it now
+### --- media: upload once, then send it with a message
+# Upload from VS Code REST Client (multipart). Change the path and the content type.
+POST {{base}}/media
+Content-Type: multipart/form-data; boundary=WaLab
+
+--WaLab
+Content-Disposition: form-data; name="file"; filename="test.mp3"
+Content-Type: audio/mpeg
+
+< C:\path\to\test.mp3
+--WaLab--
+
+### Or with curl:  curl -F "file=@C:\path\to\clip.mp4;type=video/mp4" http://localhost:5300/api/whatsapp/media
+GET {{base}}/media/{{media}}/info
+
+### Send the uploaded file (the body becomes the caption and can be empty)
+POST {{base}}/messages
+Content-Type: application/json
+
+{ "sessionId": "{{session}}", "groupName": "Advancer Wa test", "body": "Audio test {time}", "mediaId": "{{media}}" }
+
+### --- receiving
+GET {{base}}/inbound?sessionId={{session}}
+
+### --- recurring announcement (Hangfire, cron in UTC: 0 2 * * * = 09:00 WIB). It only queues; every limit still applies.
 POST {{base}}/announcements
 Content-Type: application/json
 
-{ "id": "daily-test", "groupName": "IT Batam", "body": "Daily announcement", "cron": "0 9 * * *" }
+{ "id": "daily-test", "sessionId": "{{session}}", "groupName": "Advancer Wa test", "body": "{Good morning|Morning} team, daily check {date}", "cron": "0 2 * * *" }
 
 ###
 POST {{base}}/announcements/daily-test/run-now
 
-### 8. Receive: simulate an incoming group message, then read what was recorded
-POST {{base}}/fake/incoming
-Content-Type: application/json
-
-{ "groupName": "IT Batam", "sender": "Karen", "body": "Hello from a member" }
-
 ###
-GET {{base}}/inbound
+DELETE {{base}}/announcements/daily-test
 
-### 9. Failure test: the next send fails once, then is retried
-POST {{base}}/fake/fail-next
-
-### 10. What the fake client really "sent"
-GET {{base}}/fake/sent
+### --- trigger from SQL Server (run in SSMS; SessionId NULL = first number). The allow-list is still checked.
+# INSERT INTO WhatsAppLabReal.dbo.WhatsAppOutboundMessageDbSet (Id, SessionId, GroupJid, Body, ScheduledFor, Status, Attempts, Source, SourceReference, CorrelationId, IsDeleted, CreatedBy, CreatedOn)
+# VALUES (NEWID(), NULL, 'chat:Advancer Wa test', 'Test from SQL Server', SYSUTCDATETIME(), 0, 0, 1, 'sql', 'sql1', 0, 'sql', SYSUTCDATETIME());

@@ -1,140 +1,169 @@
-# WhatsApp Lab (MAA-2102)
+# AIFM WhatsApp Gateway Lab (MAA-2102)
 
-Proyek latihan untuk belajar sebelum mengimplementasikan MAA-2102 di ERP, hari Senin. / A practice project to learn before implementing MAA-2102 in the ERP on Monday.
-Dibuat / created: 14 Nov 2026. **Tidak menyentuh repo ERP dan tidak memakai WhatsApp sungguhan** / it does not touch the ERP repo and does not use real WhatsApp.
+Layanan .NET mandiri untuk mengirim dan menerima pesan grup WhatsApp lewat WhatsApp Web (scan QR, tanpa WhatsApp Business API), untuk beberapa nomor, dengan database SQL Server sendiri dan API yang bisa dipanggil sistem lain (ERP). Proyek ini lab belajar dan uji, di luar repo ERP.
 
-## 1. Apa ini / What this is
+Status per 18 Nov 2026 (rinci di `HASIL-POC-14-NOV-2026.md`, baris 1-32):
 
-- ID: Seluruh rangka fitur (tabel, antrean kirim, pengiriman terjadwal, pemicu dari API dan SQL Server, menerima pesan, batas kirim, tombol mati) sudah jalan dengan **klien WhatsApp palsu** (`FakeWhatsAppClient`). Hari Senin, hanya satu kelas yang diisi dengan pustaka sungguhan: `RealWhatsAppClient`.
-- EN: The whole skeleton of the feature (tables, outbox, scheduled sending, triggers from an API and SQL Server, receiving, send limits, off switch) already works with a **fake WhatsApp client** (`FakeWhatsAppClient`). On Monday only one class is filled with the real library: `RealWhatsAppClient`.
+| Bagian | Status |
+|---|---|
+| Kirim teks ke grup, terjadwal, pemicu API / SQL Server / Hangfire | Terbukti dengan WhatsApp sungguhan |
+| Terima pesan teks grup | Terbukti, dengan bug: pesan akun sendiri kadang ikut tersimpan. Perbaikan ditulis 18 Nov, belum diuji di halaman asli |
+| Beberapa nomor, variasi teks, daftar grup yang diizinkan, media (audio, video, gambar) | Lulus smoke test dengan klien Fake (35 dari 35); belum diuji dengan WhatsApp sungguhan |
+| Kirim file lewat WhatsApp Web | Kode ditulis, selektor masih dugaan, belum dijalankan |
+| Terima file dari WhatsApp Web | Belum dibuat |
+| Autentikasi API, jalan di server | Belum ada |
 
-## 2. Cara kerjanya / How it works
+Risiko yang harus diingat: otomasi WhatsApp Web tidak resmi dan melanggar ketentuan WhatsApp, jadi nomor bisa diblokir. Tampilan WhatsApp Web bisa berubah dan memutus fitur. Folder login (`%LOCALAPPDATA%\aifm-whatsapp-lab\session\`) adalah kunci akun: jangan di-commit, di-zip, atau dikirim.
+
+## 1. Cara kerjanya
 
 ```text
- TRIGGERS                        OUTBOX TABLE                 DISPATCHER (background, every 2 s)
- API     POST /messages  ----+
- SQL     INSERT a row    ----+-> WhatsAppOutboundMessage ->   1. no settings row, or Off? stop
- Hangfire recurring job  ----+   (Status 0 = Pending)         2. linked? daily cap? min seconds?
-                                                              3. send through IWhatsAppClient
-                                                                 ok     -> Status 1 (Sent)
-                                                                 failed -> retry, Status 2 after 3 tries
-
- Incoming group message  <-----  IWhatsAppClient.MessageReceived
-   -> WhatsAppInboundMessage (known groups only, and only when ReceiveEnabled)
+ PEMICU (semua hanya menulis antrean)        DATABASE (SQL Server)            PEKERJA (satu proses)
+ API      POST /api/whatsapp/messages  --+
+ SQL      INSERT ke outbox             --+--> WhatsAppOutboundMessageDbSet --> Dispatcher, tiap 2 detik, per nomor:
+ Hangfire job berulang (cron, UTC)     --+    (Status 0 Pending)               Off? tertaut? jam kirim? batas harian?
+                                                                              gelombang? jeda + jitter? grup diizinkan?
+                                                                              -> klien WhatsApp nomor itu
+                                                                                 berhasil: Sent, gagal: coba ulang (maks 3)
+ Pesan masuk grup  <---------------------  loop terima tiap 10 detik (hanya grup yang dikenal dan diizinkan)
+                   --> WhatsAppInboundMessageDbSet (+ file ke WhatsAppMediaDbSet)
 ```
 
-Kunci desain / design keys:
-- Semua pemicu hanya **menulis ke antrean**. Hanya dispatcher yang mengirim, jadi semua pesan melewati batas yang sama. / Every trigger only **writes to the outbox**. Only the dispatcher sends, so every message passes the same limits.
-- Seluruh urusan WhatsApp ada di balik **satu antarmuka** (`IWhatsAppClient`). / Everything WhatsApp-specific is behind **one interface**.
-- **Off secara bawaan**: tanpa baris di `WhatsAppSettingDbSet`, tidak ada yang dikirim (pola yang sama dengan fitur wajah di ERP). / **Off by default**: no row in `WhatsAppSettingDbSet`, nothing is sent (same pattern as the face feature in the ERP).
-- Kegagalan satu pesan tidak menghentikan yang lain (fail-open). / One failing message does not stop the others.
+Kunci desain:
+- Pemicu hanya menulis ke outbox; hanya dispatcher yang mengirim, jadi semua pesan lewat aturan yang sama.
+- Semua yang khas WhatsApp ada di balik satu antarmuka `IWhatsAppClient`. Ada dua isi: `FakeWhatsAppClient` (tanpa WhatsApp, untuk uji) dan `RealWhatsAppClient` (Playwright mengendalikan Edge di WhatsApp Web).
+- Satu nomor = satu sesi = satu klien = satu folder login. Batas dan pengaturan per nomor.
+- Off secara bawaan: nomor tanpa baris pengaturan, atau `isEnabled = false`, tidak mengirim apa pun. Nomor baru selalu mulai Off.
+- Kegagalan satu pesan atau satu nomor tidak menghentikan yang lain.
 
-## 3. Peta ke ERP / Map to the ERP
+## 2. Menjalankan
 
-| Lab | Padanan di ERP / ERP counterpart |
-|---|---|
-| `WhatsAppLab.Domain` (`Entity` dan entitas / and entities) | `BinaryPlate.Domain` (`Entity`: Id, IsDeleted, kolom audit / audit columns) |
-| `WhatsAppLab.Application` (`IApplicationDbContext`, use case) | `BinaryPlate.Application` (`IApplicationDbContext`, `UseCases/...`) |
-| `WhatsAppLab.Infrastructure` (`LabDbContext`, `Configurations.cs`, `DependencyInjection.cs`) | `BinaryPlate.Infrastructure` (`ApplicationDbContext`, `Persistence/Configurations`, `DependencyInjection.cs`) |
-| `WhatsAppLab.Api` (`Program.cs`) | `BinaryPlate.WebAPI` |
-| Nama DbSet berakhiran `DbSet` / DbSet names end with `DbSet` | Sama / same |
-| `Nullable` dimatikan / disabled | Sama: kolom teks boleh kosong / same: text columns may be empty |
-| Hangfire 1.8.23, EF Core 8.0.28 | Versi yang sama dengan ERP / same versions as the ERP |
-| `WhatsAppSettingDbSet` tanpa baris = Off | `FaceVerificationSettingDbSet` |
-| `WhatsAppGroupDbSet` (nama grup ke ID grup / group name to group ID) | Melengkapi `NotificationSetupForWork.WhatsAppGroupName` yang sudah ada / completes the existing column |
-
-Tabel yang sudah ada di ERP dan tidak ditiru di sini / already in the ERP and not copied here: `AttendanceNotification` dan `NotificationSetupForWork`. Detailnya ada di `Analisis-Tabel-ERP-MAA-2102.md`.
-
-## 4. Cara menjalankan / How to run
-
-Prasyarat / needs: .NET SDK, SQL Server lokal (`localhost`, Windows Authentication).
+Prasyarat: .NET 8 SDK, SQL Server lokal (`localhost`, Windows Authentication), Microsoft Edge terpasang.
 
 ```text
 cd aifm-whatsapp-lab
 dotnet build WhatsAppLab.sln
 dotnet run --project src\WhatsAppLab.Api --urls http://localhost:5300
 ```
-- Database `WhatsAppLab` dibuat otomatis lewat migration saat program mulai (`Lab:AutoMigrate`). / The database `WhatsAppLab` is created by the migration at startup.
-- Swagger (coba semua endpoint / try every endpoint): http://localhost:5300/swagger
-- Hangfire (tugas terjadwal / scheduled jobs): http://localhost:5300/hangfire
-- Uji menyeluruh otomatis / automatic end-to-end test: `powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1` (database `WhatsAppLab` dihapus dan dibuat ulang / dropped and recreated).
 
-Urutan mencoba sendiri di Swagger / to try it yourself in Swagger:
-1. `PUT /settings` dengan `isEnabled: true` (tanpa ini tidak ada yang terkirim / nothing is sent without it).
-2. `POST /groups/sync`, lalu `GET /groups`.
-3. `POST /messages` dengan `groupName: "IT Batam"`; tunggu beberapa detik; `GET /messages` menunjukkan status Sent.
-4. Lihat log API: baris `[FAKE WhatsApp] to ...`.
+| Alamat | Isi |
+|---|---|
+| http://localhost:5300/ | Dashboard uji: login QR, pengaturan, kirim, file, grup, outbox, inbox |
+| http://localhost:5300/swagger | Semua endpoint |
+| http://localhost:5300/hangfire | Job terjadwal |
 
-## 5. Urutan membaca kode / Reading order
+Konfigurasi penting (`src/WhatsAppLab.Api/appsettings.json`, bisa ditimpa environment variable, misalnya `WhatsApp__Client=Fake`):
 
-| # | Berkas / File | Belajar apa / What to learn |
+| Kunci | Arti | Bawaan |
 |---|---|---|
-| 1 | `Domain/Entities.cs` | Lima tabel dan artinya / the five tables |
-| 2 | `Application/Abstractions.cs` | `IWhatsAppClient`: kontrak yang harus diisi hari Senin / the contract to fill on Monday |
-| 3 | `Application/UseCases.cs` | `DispatchDueAsync`: otak pengiriman (Off, batas harian, jeda, coba ulang) / the sending brain |
-| 4 | `Infrastructure/Clients.cs` | `FakeWhatsAppClient` dan `RealWhatsAppClient` (yang kosong) / the fake and the empty real one |
-| 5 | `Infrastructure/LabDbContext.cs` dan `Configurations.cs` | Cara ERP memetakan tabel / how the ERP maps tables |
-| 6 | `Api/Program.cs` dan `Workers.cs` | Endpoint, pekerja latar, tugas Hangfire / endpoints, background worker, Hangfire job |
-| 7 | `scripts/smoke-test.ps1` | Satu contoh setiap skenario / one example of every scenario |
+| `ConnectionStrings:DefaultConnection` | Database | `WhatsAppLabReal` |
+| `WhatsApp:Client` | `Real` atau `Fake` | `Real` |
+| `WhatsApp:AutoConnect` | Sambung ulang nomor yang pernah tertaut saat start | `true` |
+| `WhatsApp:ShowBrowser` | Tampilkan jendela Edge (untuk debug) | `false` |
+| `Media:Root` | Folder file media | `%LOCALAPPDATA%\aifm-whatsapp-lab\media` |
+| `Media:MaxMegabytes` | Batas ukuran file (batas kami, bukan batas WhatsApp) | `25` |
+| `WHATSAPP_PROFILE_ROOT` (env) | Folder induk login browser | `%LOCALAPPDATA%\aifm-whatsapp-lab\session` |
 
-## 6. Daftar kerja hari Senin / Monday checklist
+Mematikan dengan aman: tekan Disconnect untuk tiap nomor dulu, baru hentikan proses. Pada 16 Nov login hilang setelah proses dihentikan paksa.
 
-1. **Buktikan dulu di luar lab**: konsol kecil yang memakai pustaka pilihan, tautkan nomor dengan QR, ambil daftar grup, kirim satu pesan ke grup IT Batam. / **Prove it outside the lab first**: a small console with the chosen library, link the number by QR, list the groups, send one message to the IT Batam group.
-2. Cek sesi bertahan: matikan dan nyalakan, kirim tanpa QR baru. / Check the session survives: stop, start, send without a new QR.
-3. Isi `RealWhatsAppClient` (tiga metode, lalu peristiwa `MessageReceived`). / Fill `RealWhatsAppClient` (three methods, then the `MessageReceived` event).
-4. Set `WhatsApp:Client` = `Real` di `appsettings.json`. / Set `WhatsApp:Client` = `Real`.
-5. Coba lewat Swagger (langkah di bagian 4). Endpoint `/fake/*` sengaja menolak saat klien Real. / Try through Swagger (section 4). The `/fake/*` endpoints refuse on purpose with the Real client.
-6. Pakai pengaturan aman: `maxMessagesPerDay` kecil, `minSecondsBetweenMessages` besar, nomor yang rela hilang. / Use safe settings: a small `maxMessagesPerDay`, a large `minSecondsBetweenMessages`, a number you can afford to lose.
-7. Catat hasil per nomor tiket (1 sampai 5): terbukti, belum, atau gagal. / Note the result per ticket item (1 to 5): proven, not yet, or failed.
+## 3. Menguji
 
-## 6b. Langkah 1 dengan WhatsApp sungguhan / Step 1 with real WhatsApp (`poc\Step1.Console`)
+**A. Tanpa WhatsApp (aman, untuk belajar alur):**
+```text
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
+```
+Memakai klien Fake, port 5310, database `WhatsAppLab` (dihapus dan dibuat ulang), folder media sementara. Hasil terakhir: 35 lulus dari 35. Hasil per uji ditulis ke `scripts\smoke-results.csv`.
 
-Konsol kecil di luar lab untuk membuktikan satu hal: kirim satu pesan ke grup. Memakai paket **WhatsApp.Client 1.0.7** (otomatisasi browser dengan Playwright, port C# dari whatsapp-web.js). / A small console outside the lab to prove one thing: send one message to a group. It uses the **WhatsApp.Client 1.0.7** package (browser automation with Playwright, a C# port of whatsapp-web.js).
+**B. Dengan dashboard dan WhatsApp sungguhan** (pakai nomor yang rela hilang, minta izin sebelum mengirim ke grup orang lain):
+1. Pilih nomor di atas (atau Add number), Connect, pindai QR dari HP: WhatsApp > Perangkat tertaut > Tautkan perangkat.
+2. Sync chats / groups. Centang Allowed hanya untuk grup uji.
+3. Isi pengaturan (Fill the safe preset), centang Enabled, Save settings.
+4. Pilih template atau tulis sendiri; boleh lampirkan file; Queue message.
+5. Pantau outbox (Pending, Sent, Failed) dan log di bawah halaman.
 
-**Yang sudah dicek tentang paketnya / What was checked about the package**
-- Lisensi Apache-2.0, target .NET 8, pembuat "WhatsApp.Client Contributors", repo `github.com/darthlotu5/WhatsAppDotnet`, bergantung pada Microsoft.Playwright 1.40.0 dan FFMpegCore. / Licence Apache-2.0, targets .NET 8, repo above, depends on Microsoft.Playwright and FFMpegCore.
-- Paketnya hanya berisi pustaka (`lib/`), **tanpa skrip atau target yang berjalan saat build**. / The package holds only the library, with **no script or target that runs at build**.
-- README paket menulis `using WhatsApp.Client;` tetapi namespace sebenarnya `WhatsAppDotnet`; saya perbaiki lewat kompiler. / The package README says `WhatsApp.Client` but the real namespace is `WhatsAppDotnet`; fixed through the compiler.
-- **Belum dicek**: isi kode pustaka (hanya dll), seberapa terawat, dan perilakunya di WhatsApp. Anggap sebagai kode tidak tepercaya yang memegang sesi nomor Anda. / **Not checked**: the library code itself (only the dll), how well it is maintained, and how it behaves on WhatsApp. Treat it as untrusted code that holds your number's session.
+**C. Lewat HTTP:** `lab-api.http` berisi contoh semua endpoint (VS Code REST Client atau Visual Studio).
 
-**Hari H, berurutan / on the day, in order** (jalankan dari folder `aifm-whatsapp-lab` / run from the lab folder)
-1. Sekali saja, pasang browser Playwright (unduhan besar) / once, install the Playwright browser (large download):
-   ```text
-   dotnet build poc\Step1.Console
-   powershell -ExecutionPolicy Bypass -File poc\Step1.Console\bin\Debug\net8.0\playwright.ps1 install chromium
-   ```
-2. Tautkan nomor (browser terlihat; di HP: WhatsApp > Perangkat tertaut > Tautkan perangkat, pindai QR). **Nomor Anda tidak diketik di mana pun.** / Link the number (browser visible; on the phone: Linked devices > Link a device, scan the QR). **Your number is not typed anywhere.**
-   ```text
-   dotnet run --project poc\Step1.Console -- link
-   ```
-3. Lihat grup (tambahkan `--members` untuk jumlah anggota, tiket butir 2) / list the groups (add `--members` for the member count, ticket item 2):
-   ```text
-   dotnet run --project poc\Step1.Console -- groups
-   ```
-4. Uji kering dulu (tidak mengirim) / dry run first (sends nothing):
-   ```text
-   dotnet run --project poc\Step1.Console -- send "IT Batam" "Test dari POC"
-   ```
-5. Kirim **satu** pesan / send **one** message: tambahkan `--yes` / add `--yes`.
-6. Matikan program, nyalakan lagi, jalankan `groups` tanpa scan QR: itu bukti **sesi bertahan** (langkah 1a). / Stop the program, start it again, run `groups` with no QR scan: that proves the **session survives** (step 1a).
-7. `listen` selama 60 detik sambil menulis di grup dari HP lain: bukti **menerima pesan** (butir 4). / `listen` for 60 seconds while writing in the group from another phone: proof of **receiving** (item 4).
+## 4. API
 
-**Aturan aman / safety rules**
-- Nomor yang rela hilang; sedikit pesan; jangan menjalankan WhatsApp Web lain pada nomor yang sama saat uji. / A number you can lose; few messages; do not run another WhatsApp Web on the same number during the test.
-- Folder sesi ada di `%LOCALAPPDATA%\aifm-whatsapp-lab\session`, **di luar** proyek. Folder itu setara kunci akun: jangan di-commit, di-zip, atau dikirim. / The session folder is **outside** the project. It equals a key to the account: never commit, zip, or send it.
-- Konsol menolak teks lebih dari 500 karakter dan hanya mengirim satu pesan per jalan. / The console refuses text over 500 characters and sends one message per run.
-- Catat hasil tiap langkah di `README-MAA-2102.md` (tabel log). / Note each result in the work log table.
+Semua di bawah `/api/whatsapp`. Tambahkan `?sessionId=...` (atau `sessionId` di body) untuk memilih nomor; tanpa itu dipakai nomor pertama.
 
-**Status / status**: dibangun dan dikompilasi (0 error), mode `help` jalan. **Belum dijalankan terhadap WhatsApp sama sekali**: itu menunggu Anda dan nomor Anda. / built and compiled (0 errors), `help` mode runs. **Never run against WhatsApp yet**: that waits for you and your number.
+| Metode dan jalur | Fungsi |
+|---|---|
+| `GET /sessions`, `POST /sessions {name}` | Daftar nomor, tambah nomor (mulai Off) |
+| `GET /status` | Status login, QR, jumlah Pending / Sent / Failed |
+| `POST /connection/connect`, `/disconnect`, `/reset` | Login: buka WhatsApp Web, tutup (login tetap), lupakan login |
+| `GET /settings`, `PUT /settings` | On/off, pacing, terima pesan |
+| `POST /groups/sync`, `GET /groups` | Ambil grup dari WhatsApp, daftar grup |
+| `PUT /groups/allowed {groupJids:[...]}` | Daftar grup yang diizinkan (kosong = tanpa batas) |
+| `POST /messages {groupName, body, scheduledFor?, mediaId?}` | Antre pesan; `body` boleh memakai token |
+| `POST /messages/preview {body}` | Lihat hasil token tanpa mengantre |
+| `GET /messages` | 50 baris outbox terakhir |
+| `POST /media` (multipart, field `file`) | Unggah audio, video, atau gambar; hasil: id, tipe, ukuran, SHA-256 |
+| `GET /media/{id}`, `GET /media/{id}/info` | Unduh file, info file |
+| `GET /inbound` | 50 pesan masuk terakhir (dengan `mediaId` bila ada file) |
+| `POST /announcements {id, groupName, body, cron}`, `DELETE`, `.../run-now` | Pengumuman berulang Hangfire (cron UTC) |
+| `/fake/*` | Alat uji, hanya dengan klien Fake |
 
-## 7. Yang belum dibuktikan lab ini / What this lab does not prove
+Token teks (diisi saat pesan masuk antrean, termasuk tiap putaran job Hangfire): `{time}`, `{date}`, `{datetime}`, `{rand}` (4 angka), `{a|b|c}` (satu pilihan acak). Kurung kurawal lain dibiarkan.
 
-- Tidak ada WhatsApp sungguhan: perilaku pustaka, QR, sesi, dan blokir nomor tidak teruji. / No real WhatsApp: library behaviour, the QR, the session, and number blocking are not tested.
-- `WhatsAppSession.SessionData` belum dienkripsi (hanya kolomnya). Di sistem nyata harus dienkripsi dengan kunci di luar database. / `SessionData` is not encrypted yet (only the column). A real system must encrypt it with a key outside the database.
-- Belum terhubung ke tabel ERP (`NotificationSetupForWork.WhatsAppGroupJid` belum ditambah) dan tidak membahas layanan AST yang sudah ada. / Not connected to the ERP tables, and the existing AST service is not addressed.
-- Belum ada autentikasi di endpoint. / No authentication on the endpoints yet.
-- Pesan masuk hanya dicatat dan ditandai diproses; "memprosesnya" adalah bagian yang Anda tulis. / Incoming messages are only recorded and marked processed; "processing" is the part you write.
+Pemicu SQL Server: insert langsung ke `WhatsAppOutboundMessageDbSet` dengan `Status = 0`. Isi `SessionId` untuk memilih nomor; kosong berarti nomor pertama. Baris SQL tetap dicek terhadap daftar grup yang diizinkan.
 
-## 8. Hasil uji / Test result
+## 5. Tabel
 
-`scripts/smoke-test.ps1`, 14 Nov 2026: **13 lulus, 0 gagal dari 13** / **13 PASS, 0 FAIL of 13** (Off bawaan, sinkron grup, pesan tidak terkirim saat Off, terkirim setelah dinyalakan, pemicu API, pemicu SQL Server, jam terjadwal, tugas berulang Hangfire, gagal lalu coba ulang, batas harian, menerima pesan, mati lagi, grup tak dikenal ditolak). Semuanya dengan klien palsu. / All with the fake client.
+| Tabel | Isi |
+|---|---|
+| `WhatsAppSessionDbSet` | Satu baris per nomor: nama, `ProfileKey` (folder login), status |
+| `WhatsAppSettingDbSet` | Pengaturan per nomor (`SessionId`): on/off, batas harian, jeda, jitter, jam kirim, gelombang, terima |
+| `WhatsAppGroupDbSet` | Grup per nomor: nama, jumlah anggota, `IsActive`, `IsAllowed` |
+| `WhatsAppOutboundMessageDbSet` | Outbox: grup, teks, jadwal, status, percobaan, galat, sumber (Api / SqlTrigger / Scheduled), `MediaId` |
+| `WhatsAppInboundMessageDbSet` | Pesan masuk: grup, pengirim, teks, tipe, `MediaId` |
+| `WhatsAppMediaDbSet` | File: tipe, mime, ukuran, SHA-256, path relatif di `Media:Root` |
+
+Migrasi EF Core ada di `src/WhatsAppLab.Infrastructure/Migrations` dan berjalan otomatis saat start (`Lab:AutoMigrate`). Data lama dari versi satu nomor dipindah ke nomor pertama saat start.
+
+## 6. Urutan membaca kode
+
+| # | Berkas | Yang dipelajari |
+|---|---|---|
+| 1 | `src/WhatsAppLab.Domain/Entities.cs` | Enam tabel dan artinya |
+| 2 | `src/WhatsAppLab.Application/Abstractions.cs` | Kontrak: `IWhatsAppClient`, registry klien, antarmuka use case |
+| 3 | `src/WhatsAppLab.Application/UseCases.cs` | `DispatchDueAsync` (otak pengiriman), media, grup, pesan masuk |
+| 4 | `src/WhatsAppLab.Application/MessageText.cs` | Token variasi teks |
+| 5 | `src/WhatsAppLab.Infrastructure/Clients.cs` | Fake, Real (Playwright), dan registry satu klien per nomor |
+| 6 | `src/WhatsAppLab.Infrastructure/LabDbContext.cs`, `Configurations.cs`, `DependencyInjection.cs` | Pemetaan tabel dan pendaftaran layanan, pola yang sama dengan ERP |
+| 7 | `src/WhatsAppLab.Api/Program.cs`, `Workers.cs` | Endpoint, dispatcher latar, job Hangfire |
+| 8 | `scripts/smoke-test.ps1` | Satu contoh untuk tiap skenario |
+
+## 7. Peta ke ERP (dicek di repo ERP, 18 Nov 2026)
+
+| Lab | Padanan di ERP (`aifm_erp/src`) |
+|---|---|
+| `Domain/Entities.cs`, `Entity` | `BinaryPlate.Domain` (Id, IsDeleted, kolom audit) |
+| `IApplicationDbContext` di `Abstractions.cs` | `BinaryPlate.Application/Common/Interfaces/Persistence/IApplicationDbContext.cs` |
+| Antarmuka use case | `BinaryPlate.Application/Common/Interfaces/UseCases/<Modul>/` |
+| Use case | `BinaryPlate.Application/UseCases/<Modul>/` |
+| `DependencyInjection.cs` (`AddScoped<...>`) | `BinaryPlate.Infrastructure/DependencyInjection.cs`, tempat ERP mendaftarkan use case |
+| `LabDbContext`, `Configurations.cs` | `BinaryPlate.Infrastructure/Persistence/ApplicationDbContext.cs` dan konfigurasinya |
+| Endpoint di `Program.cs` | Controller di `BinaryPlate.WebAPI/Controllers/<Modul>/` |
+| Hangfire (`AddHangfire`, cron) | ERP sudah memakai Hangfire: `AddHangfire` di `Infrastructure/DependencyInjection.cs` dengan connection string `HangfireConnection` sendiri, dan job berulang lewat `IRecurringJobManager` (contoh: `WebAPI/Hubs/EmployeeHub.cs`). Jangan menambah Hangfire kedua |
+| Dispatcher (`BackgroundService`) | Belum ada `BackgroundService` atau `IHostedService` di ERP |
+| Pengiriman WhatsApp yang sudah ada | ERP sudah mengirim lewat layanan AST (`Application/Common/Helpers/WhatsApp.cs`, kirim saja, berdasarkan nama grup), tabel `AttendanceNotification` dan `NotificationSetupForWork`. Lihat `Analisis-Tabel-ERP-MAA-2102.md` |
+
+Dua cara menghubungkan ke ERP:
+1. **Disarankan, sesuai arahan CW (17 Nov):** gateway ini berdiri sendiri, ERP memanggil API-nya (`POST /messages`, `GET /inbound`). Di ERP cukup satu use case kecil yang memanggil HTTP, di tempat yang sekarang memanggil AST. Browser per nomor tidak masuk ke proses web ERP.
+2. Ditanam di ERP: tabel ke `ApplicationDbContext`, use case ke `UseCases`, dispatcher sebagai hosted service baru. Tidak disarankan, karena tiap nomor menjalankan browser di proses web ERP.
+
+Sebelum masuk ERP masih perlu: API key per sistem pemanggil, uji media dengan WhatsApp sungguhan, jalan di server, dan perbaikan bug pesan sendiri di penerimaan.
+
+## 8. Dokumen di repo ini
+
+| Berkas | Isi |
+|---|---|
+| `HASIL-POC-14-NOV-2026.md` | Log semua uji (baris 1-32) |
+| `POC-REPORT-MAA-2102.md` / `.id.md` (+ PDF) | Laporan POC untuk CW |
+| `DESAIN-SISTEM-MAA-2102(.id).html` (+ PDF) | Gambar arsitektur dan alur dispatcher |
+| `STUDY-NEXT-PHASE-MAA-2102.md`, `STUDI-FASE-LANJUT-MAA-2102.md` (+ PDF) | Studi implementasi dan keamanan fase lanjut |
+| `Analisis-Tabel-ERP-MAA-2102.md` | Tabel ERP yang terkait |
+| `Panduan-WhatsApp-Lab.pdf` | Panduan lama (14 Nov, versi satu nomor dan klien Fake) |
+| `scripts/build-poc-report.ps1`, `scripts/translate-design-id.ps1` | Membuat ulang laporan dan gambar |
+| `poc/Step1.Console` | Percobaan pertama dengan paket WhatsApp.Client (gagal karena CSP, disimpan sebagai catatan) |

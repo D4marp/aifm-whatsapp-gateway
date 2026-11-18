@@ -1,0 +1,82 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Desain fase lanjut MAA-2102</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:0}
+svg{display:block;width:96%;margin:0 auto}
+text{font-family:Segoe UI,Arial,sans-serif;fill:#111}
+.t{font-size:14px;font-weight:bold}.s{font-size:12.5px}.h{font-size:14px;font-weight:bold}.n{font-size:12px;font-style:italic}
+</style></head><body>
+<svg viewBox="0 0 1000 550" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#222"/></marker>
+</defs>
+
+<!-- row 1 -->
+<rect x="20" y="40" width="190" height="110" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2"/>
+<text class="t" x="32" y="66">Sistem web lain</text>
+<text class="s" x="32" y="88">ERP dan lainnya</text>
+<text class="s" x="32" y="108">POST pesan keluar</text>
+<text class="s" x="32" y="126">GET pesan masuk</text>
+
+<rect x="250" y="40" width="220" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="262" y="66">Gateway API</text>
+<text class="s" x="262" y="86">API key per sistem</text>
+<text class="s" x="262" y="104">POST /messages (teks, media)</text>
+<text class="s" x="262" y="122">GET /inbound setelah kursor</text>
+<text class="s" x="262" y="140">status per pesan</text>
+
+<rect x="510" y="40" width="210" height="110" rx="8" fill="#e5e7eb" stroke="#374151" stroke-width="2"/>
+<text class="t" x="522" y="66">SQL Server, database sendiri</text>
+<text class="s" x="522" y="88">Nomor dan status login</text>
+<text class="s" x="522" y="106">Outbox dan Inbound</text>
+<text class="s" x="522" y="124">Metadata media</text>
+<text class="s" x="522" y="142">Klien, key, log audit</text>
+
+<rect x="750" y="40" width="230" height="110" rx="8" fill="#e5e7eb" stroke="#374151" stroke-width="2"/>
+<text class="t" x="762" y="66">Penyimpanan media</text>
+<text class="s" x="762" y="88">audio, video, gambar</text>
+<text class="s" x="762" y="106">file di disk atau blob</text>
+<text class="s" x="762" y="124">path dan hash di DB</text>
+
+<line x1="210" y1="95" x2="250" y2="95" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="470" y1="95" x2="510" y2="95" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+
+<!-- workers -->
+<rect x="250" y="225" width="730" height="185" rx="10" fill="none" stroke="#c2410c" stroke-width="2" stroke-dasharray="7 5"/>
+<text class="h" x="266" y="250">Worker sesi, satu per nomor (konektor: browser atau pustaka)</text>
+
+<rect x="270" y="270" width="200" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="282" y="296">Worker, nomor A</text>
+<text class="s" x="282" y="318">login sendiri</text>
+<text class="s" x="282" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="282" y="354">kirim, terima, media</text>
+
+<rect x="505" y="270" width="200" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="517" y="296">Worker, nomor B</text>
+<text class="s" x="517" y="318">login sendiri</text>
+<text class="s" x="517" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="517" y="354">kirim, terima, media</text>
+
+<rect x="740" y="270" width="220" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="752" y="296">Worker, nomor C ...</text>
+<text class="s" x="752" y="318">login sendiri</text>
+<text class="s" x="752" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="752" y="354">kirim, terima, media</text>
+
+<line x1="615" y1="150" x2="615" y2="225" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<text class="n" x="625" y="192">antrean dan hasil</text>
+<line x1="865" y1="150" x2="865" y2="225" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<text class="n" x="875" y="192">file</text>
+
+<!-- whatsapp -->
+<rect x="250" y="470" width="730" height="60" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+<text class="t" x="266" y="506">WhatsApp: grup dan kontak tiap nomor</text>
+<line x1="370" y1="380" x2="370" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="605" y1="380" x2="605" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="850" y1="380" x2="850" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+
+<!-- note -->
+<text class="s" x="20" y="260">ERP hanyalah</text>
+<text class="s" x="20" y="278">satu klien dari API.</text>
+</svg>
+</body></html>

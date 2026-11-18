@@ -1,0 +1,82 @@
+<!doctype html><html><head><meta charset='utf-8'><title>MAA-2102 POC report</title><style>@page{size:A4;margin:16mm}body{font-family:Segoe UI,Arial,sans-serif;font-size:11pt;color:#111;margin:0}
+h1{font-size:18pt;margin:0 0 6pt}h2{font-size:13pt;margin:16pt 0 6pt;break-after:avoid}
+p{margin:4pt 0;break-after:avoid}
+table{width:100%;border-collapse:collapse;table-layout:fixed;margin:6pt 0}
+th,td{border:1px solid #444;padding:4pt 6pt;text-align:left;vertical-align:top;word-wrap:break-word;font-size:10pt}
+code{font-size:9pt}tr{page-break-inside:avoid}
+.fig{margin:6pt 0;text-align:center;break-inside:avoid}
+.fig svg{width:100%}.fig.f1 svg{width:78%}.fig.f2 svg{width:66%}.fig img{width:74%;border:1px solid #444}
+text{font-family:Segoe UI,Arial,sans-serif;fill:#111}
+.t{font-size:14px;font-weight:bold}.s{font-size:12.5px}.h{font-size:15px;font-weight:bold}.n{font-size:12px;font-style:italic}</style></head><body><h1>MAA-2102 fase lanjut: studi implementasi dan keamanan</h1><h2>Permintaan</h2><p>Sistem .NET mandiri dengan database SQL Server sendiri yang mengelola pesan masuk dan keluar (teks, audio, video) untuk beberapa nomor WhatsApp, dengan metode API supaya sistem web lain bisa mengirim pesan keluar dan membaca pesan masuk.</p><h2>Yang sudah dicakup POC</h2><table><tr><th>Bagian</th><th>Status</th></tr><tr><td>Database SQL Server sendiri dengan tabel outbox dan inbound</td><td>Selesai, hanya teks</td></tr><tr><td>API untuk mengantre pesan dan membaca pesan masuk</td><td>Selesai di lab, belum ada autentikasi</td></tr><tr><td>Pacing: jam kirim, batas harian, batas gelombang, jeda, jitter acak</td><td>Selesai, untuk satu nomor</td></tr><tr><td>Konektor WhatsApp yang bisa diganti (interface dengan versi fake dan real)</td><td>Selesai</td></tr><tr><td>Beberapa nomor sekaligus</td><td>Belum: satu nomor = satu profil browser = satu worker</td></tr><tr><td>Audio dan video</td><td>Belum</td></tr><tr><td>Autentikasi API, akses per sistem, status pengiriman</td><td>Belum</td></tr><tr><td>Jalan di server</td><td>Belum diuji</td></tr></table><h2>Desain target</h2><div class="fig f1"><svg viewBox="0 0 1000 550" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#222"/></marker>
+</defs>
+
+<!-- row 1 -->
+<rect x="20" y="40" width="190" height="110" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2"/>
+<text class="t" x="32" y="66">Sistem web lain</text>
+<text class="s" x="32" y="88">ERP dan lainnya</text>
+<text class="s" x="32" y="108">POST pesan keluar</text>
+<text class="s" x="32" y="126">GET pesan masuk</text>
+
+<rect x="250" y="40" width="220" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="262" y="66">Gateway API</text>
+<text class="s" x="262" y="86">API key per sistem</text>
+<text class="s" x="262" y="104">POST /messages (teks, media)</text>
+<text class="s" x="262" y="122">GET /inbound setelah kursor</text>
+<text class="s" x="262" y="140">status per pesan</text>
+
+<rect x="510" y="40" width="210" height="110" rx="8" fill="#e5e7eb" stroke="#374151" stroke-width="2"/>
+<text class="t" x="522" y="66">SQL Server, database sendiri</text>
+<text class="s" x="522" y="88">Nomor dan status login</text>
+<text class="s" x="522" y="106">Outbox dan Inbound</text>
+<text class="s" x="522" y="124">Metadata media</text>
+<text class="s" x="522" y="142">Klien, key, log audit</text>
+
+<rect x="750" y="40" width="230" height="110" rx="8" fill="#e5e7eb" stroke="#374151" stroke-width="2"/>
+<text class="t" x="762" y="66">Penyimpanan media</text>
+<text class="s" x="762" y="88">audio, video, gambar</text>
+<text class="s" x="762" y="106">file di disk atau blob</text>
+<text class="s" x="762" y="124">path dan hash di DB</text>
+
+<line x1="210" y1="95" x2="250" y2="95" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="470" y1="95" x2="510" y2="95" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+
+<!-- workers -->
+<rect x="250" y="225" width="730" height="185" rx="10" fill="none" stroke="#c2410c" stroke-width="2" stroke-dasharray="7 5"/>
+<text class="h" x="266" y="250">Worker sesi, satu per nomor (konektor: browser atau pustaka)</text>
+
+<rect x="270" y="270" width="200" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="282" y="296">Worker, nomor A</text>
+<text class="s" x="282" y="318">login sendiri</text>
+<text class="s" x="282" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="282" y="354">kirim, terima, media</text>
+
+<rect x="505" y="270" width="200" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="517" y="296">Worker, nomor B</text>
+<text class="s" x="517" y="318">login sendiri</text>
+<text class="s" x="517" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="517" y="354">kirim, terima, media</text>
+
+<rect x="740" y="270" width="220" height="110" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2"/>
+<text class="t" x="752" y="296">Worker, nomor C ...</text>
+<text class="s" x="752" y="318">login sendiri</text>
+<text class="s" x="752" y="336">pacing dan batas harian sendiri</text>
+<text class="s" x="752" y="354">kirim, terima, media</text>
+
+<line x1="615" y1="150" x2="615" y2="225" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<text class="n" x="625" y="192">antrean dan hasil</text>
+<line x1="865" y1="150" x2="865" y2="225" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<text class="n" x="875" y="192">file</text>
+
+<!-- whatsapp -->
+<rect x="250" y="470" width="730" height="60" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+<text class="t" x="266" y="506">WhatsApp: grup dan kontak tiap nomor</text>
+<line x1="370" y1="380" x2="370" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="605" y1="380" x2="605" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="850" y1="380" x2="850" y2="470" stroke="#222" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+
+<!-- note -->
+<text class="s" x="20" y="260">ERP hanyalah</text>
+<text class="s" x="20" y="278">satu klien dari API.</text>
+</svg></div><p>ERP menjadi satu klien dari API. Tiap nomor punya worker, login, dan pacing sendiri. Pesan dan hasilnya lewat database, jadi worker yang restart tidak menghilangkan pesan yang sudah diantre.</p><h2>Pilihan konektor</h2><table><tr><th>Pilihan</th><th>Apa itu</th><th>Media</th><th>Catatan</th></tr><tr><td>Otomasi browser (sekarang: Playwright dan Edge)</td><td>Mengendalikan WhatsApp Web seperti orang</td><td>Teks terbukti; audio dan video belum diuji</td><td>Satu browser per nomor. Memori per sesi belum diukur; tidak ada angka publik yang andal. Rusak saat tampilan halaman berubah (4 perbaikan dalam sehari di POC)</td></tr><tr><td>Baileys (TypeScript)</td><td>Bicara ke WhatsApp Web lewat WebSocket; login dengan QR atau kode pairing</td><td>README pustaka menjelaskan kirim audio, video, voice note, dan unduh media</td><td>Bukan .NET, jadi jalan sebagai layanan terpisah. Pengelola menyatakan tidak mendukung pemakaian yang melanggar ketentuan WhatsApp. Versi 7.0.0 punya perubahan yang memutus kompatibilitas</td></tr><tr><td>whatsmeow (Go)</td><td>Klien Go untuk API multi-device</td><td>README menyebut media didukung</td><td>Bukan .NET, jadi layanan terpisah</td></tr><tr><td>Port .NET dari Baileys: Baileys.NET 1.9.1, Dawa.WhatsApp</td><td>Port C#</td><td>Belum diperiksa</td><td>Baileys.NET: .NET 10, MIT, diperbarui 25 Apr 2026, total 2,2 ribu unduhan. README Dawa.WhatsApp menyebut tahap awal. Kelengkapan dan perawatannya belum diverifikasi</td></tr><tr><td>Port siap pakai whatsapp-web.js di NuGet (WhatsApp.Client)</td><td>Sudah dicoba di POC</td><td>Tidak berlaku</td><td>Gagal: kebijakan keamanan konten WhatsApp Web memblokir skripnya</td></tr></table><p>Rekomendasi: pertahankan konektor sekarang untuk teks (sudah terbukti) dan pertahankan interface-nya, sehingga konektor kedua bisa ditambahkan. Di Phase 0, uji satu konektor tingkat protokol untuk media dan beberapa nomor, lalu pilih berdasarkan hasil uji, bukan dokumentasi. Kedua jenis tidak resmi.</p><h2>Catatan implementasi (usulan, belum dibangun)</h2><table><tr><th>Kebutuhan</th><th>Cara</th></tr><tr><td>Beberapa nomor</td><td>Tabel sesi (nomor, status, lokasi login, pengaturan). Satu worker per sesi dengan folder login atau auth state sendiri, pacing dan batas harian sendiri. Login QR per nomor dari dashboard atau API. Nomor yang sama tidak pernah dipakai di dua tempat</td></tr><tr><td>Kirim media</td><td>Baris outbox menunjuk ke catatan media. Worker mengunggah file lewat konektor. Ada batas ukuran dan tipe</td></tr><tr><td>Terima media</td><td>Worker mengunduh file dan menyimpannya di luar database (disk atau blob). Database menyimpan tipe, ukuran, hash, dan path. Unduhan gagal dicoba ulang dan ditandai</td></tr><tr><td>Kirim pesan keluar</td><td>POST dengan nomor, tujuan grup atau kontak, teks atau id media, dan kunci idempotensi opsional. Mengembalikan id. GET status: Pending, Sent, Failed</td></tr><tr><td>Baca pesan masuk</td><td>GET pesan masuk setelah kursor, disaring per nomor. Klien mengonfirmasi yang sudah diproses, jadi tidak ada yang terbaca dua kali atau hilang. Webhook sebagai opsi nanti</td></tr><tr><td>Tata letak proses</td><td>Worker jalan sebagai layanan sendiri, bukan di dalam ERP. API tetap hidup saat worker restart</td></tr></table><h2>Keamanan: akun (risiko blokir)</h2><p>Isi sumber: Ketentuan Layanan WhatsApp melarang pesan massal, pesan otomatis, dan pembuatan akun otomatis. Pedoman Pesan (diperbarui 23 Sep 2026) mencantumkan klien tidak resmi, pesan massal, dan otomasi di bawah perilaku adversarial, dengan batasan &quot;to harm WhatsApp or our users&quot;, dan menyebut akun bisa ditangguhkan sementara atau permanen. Kedua jenis konektor tidak resmi, jadi tidak ada yang menghilangkan risiko. Artikel vendor menyebut blokir sering mendadak tanpa peringatan; sumbernya perusahaan yang menjual API resmi, jadi hanya sebagai petunjuk. Tidak ditemukan aturan publik tentang laju kirim yang aman. Pengaturan POC (10 sampai 15 per hari, gelombang) berasal dari saran tim dan belum diverifikasi.</p><table><tr><th>Langkah</th><th>Alasan</th></tr><tr><td>Pakai nomor khusus, bukan nomor pribadi</td><td>Blokir hanya mengorbankan nomor itu (pelajaran POC: nomor yang tertaut adalah nomor pribadi)</td></tr><tr><td>Kirim hanya ke grup dan orang yang memang menunggu pesan</td><td>Pedoman menyebut kontak berulang yang tidak diinginkan sebagai spam</td></tr><tr><td>Pacing per nomor: jam, batas harian, gelombang, jeda, jitter</td><td>Menghindari lonjakan seperti mesin (sudah diterapkan)</td></tr><tr><td>Satu worker per nomor, tidak ada login kedua untuk nomor yang sama</td><td>Menghindari sesi yang bentrok</td></tr><tr><td>Jangan membuka dan menutup koneksi berulang cepat</td><td>Satu artikel vendor mencantumkannya sebagai pola mencurigakan (satu sumber)</td></tr><tr><td>Tombol darurat per nomor; berhenti otomatis saat logout atau gagal berulang</td><td>Menghentikan sebelum kerusakan membesar</td></tr><tr><td>Pantau pengiriman, kegagalan, dan logout per nomor</td><td>Masalah ketahuan lebih awal</td></tr></table><h2>Keamanan: sistem</h2><table><tr><th>Area</th><th>Langkah</th></tr><tr><td>Akses API</td><td>API key per sistem pemanggil, disimpan ter-hash, dibatasi ke nomor yang diizinkan. HTTPS. Pembatasan laju per key</td></tr><tr><td>Bahan login</td><td>Profil browser atau auth state adalah kunci akun: disk terenkripsi, akses terbatas, tidak pernah di git, zip, atau cadangan yang dibagikan</td></tr><tr><td>Rahasia</td><td>Connection string dan key di luar repositori (vault atau environment)</td></tr><tr><td>Data pribadi</td><td>Pesan grup bersifat pribadi. Daftar grup yang diizinkan dibaca per nomor (pelajaran POC: penerimaan menyimpan pesan dari grup yang tidak terkait), masa simpan, log akses</td></tr><tr><td>File media</td><td>Batas ukuran dan tipe, pindai malware, tidak pernah dieksekusi, disimpan di luar web root</td></tr><tr><td>Audit</td><td>Catat siapa mengirim apa, ke nomor mana, kapan. Isi pesan tidak ditulis ke log aplikasi</td></tr><tr><td>Ketahanan</td><td>Outbox ada di database; worker crash tidak menghilangkan apa pun; coba ulang sampai 3 kali (sudah diterapkan)</td></tr></table><h2>Rencana pembuktian Phase 0</h2><table><tr><th>#</th><th>Uji</th><th>Selesai bila</th></tr><tr><td>1</td><td>Beberapa nomor paralel</td><td>3 nomor tertaut dan mengirim; memori dan CPU per sesi terukur</td></tr><tr><td>2</td><td>Kirim audio dan video</td><td>Satu audio dan satu video terkirim ke grup uji</td></tr><tr><td>3</td><td>Terima audio dan video</td><td>Media dari nomor lain tersimpan dengan tipe, ukuran, dan hash benar</td></tr><tr><td>4</td><td>Jalan di server</td><td>Worker jalan tanpa jendela selama beberapa hari; login bertahan setelah restart</td></tr><tr><td>5</td><td>Konektor kedua</td><td>Uji yang sama dengan satu pustaka tingkat protokol, dibandingkan dengan konektor browser</td></tr><tr><td>6</td><td>API dan keamanan</td><td>Dua klien dengan key terpisah; masing-masing hanya melihat nomornya sendiri</td></tr></table><p>Setiap uji dicatat di file hasil. Estimasi baru diberikan setelah semua ini selesai.</p><h2>Sumber</h2><table><tr><th>Sumber</th><th>Tautan</th></tr><tr><td>Ketentuan Layanan WhatsApp (berlaku 4 Jan 2021)</td><td>https://www.whatsapp.com/legal/terms-of-service</td></tr><tr><td>Pedoman Pesan WhatsApp (diperbarui 23 Sep 2026)</td><td>https://www.whatsapp.com/legal/messaging-guidelines</td></tr><tr><td>Baileys</td><td>https://github.com/WhiskeySockets/Baileys</td></tr><tr><td>whatsmeow</td><td>https://github.com/tulir/whatsmeow</td></tr><tr><td>Baileys.NET (NuGet)</td><td>https://www.nuget.org/packages/Baileys.NET</td></tr><tr><td>Dawa.WhatsApp (NuGet)</td><td>https://www.nuget.org/packages/Dawa.WhatsApp</td></tr><tr><td>Artikel vendor tentang risiko API tidak resmi (hanya petunjuk)</td><td>https://www.bot.space/blog/whatsapp-api-vs-unofficial-tools-a-complete-risk-reward-analysis-for-2025</td></tr></table></body></html>

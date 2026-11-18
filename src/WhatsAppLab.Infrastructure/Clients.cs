@@ -39,6 +39,30 @@ public class FakeWhatsAppClient : IWhatsAppClient
         return Task.FromResult(new SendResult(true, null));
     }
 
+    private readonly List<(string Jid, string FileName, string Mime, string Caption, string Sha256, long Size)> _sentMedia = new();
+    public IReadOnlyList<(string Jid, string FileName, string Mime, string Caption, string Sha256, long Size)> SentMedia { get { lock (_sentMedia) return _sentMedia.ToList(); } }
+
+    /// <summary>The fake "sends" a file by reading it and remembering its hash, so a test can prove the bytes that arrived are the bytes that were uploaded.</summary>
+    public Task<SendResult> SendGroupMediaAsync(string groupJid, string filePath, string mimeType, string caption, CancellationToken ct)
+    {
+        if (_failNext) { _failNext = false; return Task.FromResult(new SendResult(false, "Simulated failure")); }
+        if (!File.Exists(filePath)) return Task.FromResult(new SendResult(false, "File not found"));
+        using var fs = File.OpenRead(filePath);
+        var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs)).ToLowerInvariant();
+        lock (_sentMedia) _sentMedia.Add((groupJid, Path.GetFileName(filePath), mimeType, caption, sha, new FileInfo(filePath).Length));
+        _logger.LogInformation("[FAKE WhatsApp] file to {Group}: {File} ({Mime})", groupJid, Path.GetFileName(filePath), mimeType);
+        return Task.FromResult(new SendResult(true, null));
+    }
+
+    /// <summary>Test helper: pretend someone sent a file in a group. The file is copied to a temporary path, like a real client would save a download.</summary>
+    public Task SimulateIncomingMediaAsync(string groupJid, string sender, string caption, string sourcePath, string mime)
+    {
+        if (MessageReceived == null) return Task.CompletedTask;
+        var tmp = Path.Combine(Path.GetTempPath(), "wa-fake-" + Guid.NewGuid().ToString("N") + Path.GetExtension(sourcePath));
+        File.Copy(sourcePath, tmp);
+        return MessageReceived.Invoke(new InboundMessage(groupJid, sender + "@s.whatsapp.net", sender, caption, DateTime.UtcNow, tmp, mime));
+    }
+
     /// <summary>Test helper: pretend someone wrote in a group.</summary>
     public Task SimulateIncomingAsync(string groupJid, string sender, string body) =>
         MessageReceived == null ? Task.CompletedTask : MessageReceived.Invoke(new InboundMessage(groupJid, sender + "@s.whatsapp.net", sender, body, DateTime.UtcNow));
@@ -53,7 +77,9 @@ public class FakeWhatsAppClient : IWhatsAppClient
 /// </summary>
 public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsyncDisposable
 {
-    private static string ProfileDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "aifm-whatsapp-lab", "session", "edge-profile");
+    // One browser profile (= one login = one number) per client. The folder is <root>\<profileKey>; the root can be moved with WHATSAPP_PROFILE_ROOT (e.g. for a test instance that must not touch the real logins).
+    private readonly string _profileKey;
+    private string ProfileDir => Path.Combine(Environment.GetEnvironmentVariable("WHATSAPP_PROFILE_ROOT") is { Length: > 0 } root ? root : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "aifm-whatsapp-lab", "session"), _profileKey);
     private string _connection = "disconnected";
     public string Connection => _connection;
 
@@ -67,6 +93,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
 
     public async Task DisconnectAsync(CancellationToken ct)
     {
+        _loopCts?.Cancel();   // stop the receive loop first so it does not keep the gate while we wait
         await _gate.WaitAsync(ct);
         try { await CloseBrowserAsync(); }
         finally { _gate.Release(); }
@@ -74,6 +101,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
 
     public async Task ResetSessionAsync(CancellationToken ct)
     {
+        _loopCts?.Cancel();
         await _gate.WaitAsync(ct);
         try
         {
@@ -98,9 +126,10 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
 
     // WhatsApp:ShowBrowser = true shows the Edge window (for debugging). Default: hidden, everything runs behind the scenes.
     private readonly bool _showBrowser;
-    public RealWhatsAppClient(ILogger<RealWhatsAppClient> logger, Microsoft.Extensions.Configuration.IConfiguration config)
+    public RealWhatsAppClient(ILogger<RealWhatsAppClient> logger, Microsoft.Extensions.Configuration.IConfiguration config, string profileKey = "edge-profile")
     {
         _logger = logger;
+        _profileKey = string.IsNullOrWhiteSpace(profileKey) ? "edge-profile" : profileKey;
         _showBrowser = string.Equals(config["WhatsApp:ShowBrowser"], "true", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -117,6 +146,36 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     private CancellationTokenSource _loopCts;
 
     public void SetReceiving(bool on) => _receiving = on;
+
+    // Fix for the "own messages stored as incoming" bug (16 Nov: 14 rows). The direction check on the page misses some outgoing messages,
+    // so two extra guards: (1) the sender name this number uses, learned right after each send; (2) texts this number sent in the last 30 minutes.
+    // Written 18 Nov. It only compiles so far: the Fake client does not run this code, so it must be confirmed on the live page.
+    private readonly HashSet<string> _ownNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Text, DateTime At)> _recentSent = new();
+    private void RememberSent(string text)
+    {
+        _recentSent.Enqueue(((text ?? "").Trim(), DateTime.UtcNow));
+        while (_recentSent.TryPeek(out var old) && (DateTime.UtcNow - old.At).TotalMinutes > 30) _recentSent.TryDequeue(out _);
+    }
+    private bool IsOwnMessage(string sender, string text)
+    {
+        if (!string.IsNullOrEmpty(sender) && _ownNames.Contains(sender)) return true;
+        var t = (text ?? "").Trim();
+        return t.Length > 0 && _recentSent.Any(r => r.Text == t && (DateTime.UtcNow - r.At).TotalMinutes <= 30);
+    }
+    private async Task LearnOwnNameAsync(Microsoft.Playwright.IPage p)
+    {
+        try
+        {
+            var msgs = await p.EvaluateAsync<MsgInfo[]>(MessagesJs);
+            var last = msgs.LastOrDefault(m => m.pre != null && m.dir == "out");
+            if (last != null && System.Text.RegularExpressions.Regex.Match(last.pre, @"\]\s*(.*?):\s*$") is { Success: true } sm && _ownNames.Add(sm.Groups[1].Value))
+                _logger.LogInformation("[REAL WhatsApp] learned the sender name of this number");
+        }
+        catch { }   // only a helper: sending already succeeded
+    }
+    private volatile HashSet<string> _allowedTitles = new();
+    public void SetAllowedGroups(IReadOnlyCollection<string> names) => _allowedTitles = new HashSet<string>(names ?? Array.Empty<string>());
 
     // Direction (checked on the live page 16 Nov): ids and message-in/out classes carry no direction. An outgoing message has a tail-out icon and/or the labels "You:" / "Delivered" / "Read" / "Sent"; everything else is incoming.
     private const string MessagesJs =@"() => [...document.querySelectorAll('#main div[data-id]')].map(m => { const pre = m.querySelector('[data-pre-plain-text]'); const txt = m.querySelector('span.selectable-text'); const isOut = !!m.querySelector(""[data-icon='tail-out']"") || [...m.querySelectorAll('[aria-label]')].some(a => /^(You:|Delivered|Read|Sent|Pending)\s*$/.test(a.getAttribute('aria-label'))); const dir = isOut ? 'out' : 'in'; return { id: m.getAttribute('data-id'), pre: pre ? pre.getAttribute('data-pre-plain-text') : null, text: txt ? txt.innerText : null, dir: dir }; })";
@@ -139,7 +198,8 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
                 foreach (var r in rows.Where(r => r.unread != null))
                     _logger.LogInformation("[REAL WhatsApp] receive: unread badge on '{Title}' ({Badge}), known group: {Known}", r.title, r.unread, _groupTitles.Contains(r.title));
                 // Found 16 Nov: the badge is gone when the phone already shows/reads the chat. So also treat a changed row (preview text or time) as new activity.
-                var known = rows.Where(r => r.title != null && _groupTitles.Contains(r.title)).ToList();
+                var allowedNow = _allowedTitles;   // empty = no restriction; otherwise only these groups are ever opened
+                var known = rows.Where(r => r.title != null && _groupTitles.Contains(r.title) && (allowedNow.Count == 0 || allowedNow.Contains(r.title))).ToList();
                 var changed = known.Where(r => r.unread != null || (_lastSig.TryGetValue(r.title, out var old) && old != r.text)).Take(3).ToList();
                 foreach (var r in known) if (!_lastSig.ContainsKey(r.title)) _lastSig[r.title] = r.text;   // first look: remember, do not replay old messages
                 foreach (var r in changed) _lastSig[r.title] = r.text;
@@ -165,6 +225,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
                     foreach (var m in fresh)
                     {
                         var who = m.pre != null && System.Text.RegularExpressions.Regex.Match(m.pre, @"\]\s*(.*?):\s*$") is { Success: true } sm ? sm.Groups[1].Value : "unknown";
+                        if (IsOwnMessage(who, m.text)) { _logger.LogInformation("[REAL WhatsApp] receive: skipped a message sent by this number in {Group}", row.title); continue; }
                         _logger.LogInformation("[REAL WhatsApp] received in {Group} from {Sender}", row.title, who);
                         await MessageReceived.Invoke(new InboundMessage("chat:" + row.title, who + "@lab", who, m.text, DateTime.UtcNow));
                     }
@@ -180,7 +241,7 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     private async Task<Microsoft.Playwright.IPage> EnsurePageAsync()
     {
         if (_page != null && !_page.IsClosed) return _page;
-        var profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "aifm-whatsapp-lab", "session", "edge-profile");
+        var profile = ProfileDir;
         Directory.CreateDirectory(profile);
         _pw ??= await Microsoft.Playwright.Playwright.CreateAsync();
         _context = await _pw.Chromium.LaunchPersistentContextAsync(profile, new Microsoft.Playwright.BrowserTypeLaunchPersistentContextOptions
@@ -347,11 +408,64 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
             }
             await p.Keyboard.PressAsync("Enter");
             await Task.Delay(1500, ct);
+            RememberSent(body);
+            await LearnOwnNameAsync(p);
             await ClearSearchAsync(p);   // empty the search so the chat list is back to normal (and shows unread badges)
             _logger.LogInformation("[REAL WhatsApp] sent to {Name}", name);
             return new SendResult(true, null);
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Send failed"); return new SendResult(false, ex.Message); }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// EXPERIMENTAL (written 17 Nov, not yet run against the live page): sends a file through the attach menu of WhatsApp Web.
+    /// The selectors below are the first guess and must be confirmed with a real send to a test chat; a failure returns the reason so the next attempt can fix the selector.
+    /// An audio file goes as a document-style audio attachment, not as a voice note.
+    /// </summary>
+    public async Task<SendResult> SendGroupMediaAsync(string groupJid, string filePath, string mimeType, string caption, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var p = _page;
+            if (p == null || p.IsClosed || !await ChatListVisibleAsync(p)) return new SendResult(false, "Not linked: connect and scan the QR first");
+            if (!File.Exists(filePath)) return new SendResult(false, "File not found: " + Path.GetFileName(filePath));
+            var name = groupJid.StartsWith("chat:") ? groupJid.Substring(5) : groupJid;
+
+            await OpenChatAsync(p, name);
+            await p.Locator("footer div[contenteditable='true']").First.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 8000 });
+
+            // 1) open the attach menu
+            await p.Locator("footer [data-icon='plus'], footer [data-icon='attach-menu-plus'], footer button[aria-label='Attach']").First
+                .ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 6000 });
+            await Task.Delay(700, ct);
+
+            // 2) the menu holds hidden file inputs: one for photos and videos, one for documents
+            var asMedia = mimeType != null && (mimeType.StartsWith("video/") || mimeType.StartsWith("image/"));
+            var input = asMedia
+                ? p.Locator("input[type='file'][accept*='image'], input[type='file'][accept*='video']").First
+                : p.Locator("input[type='file']:not([accept*='image']):not([accept*='video'])").First;
+            await input.SetInputFilesAsync(filePath, new Microsoft.Playwright.LocatorSetInputFilesOptions { Timeout = 8000 });
+
+            // 3) the preview opens; add the caption (the last editable box is the caption) and press send
+            await Task.Delay(1500, ct);
+            if (!string.IsNullOrEmpty(caption))
+            {
+                var cap = p.Locator("div[contenteditable='true']").Last;
+                await cap.FocusAsync();
+                await p.Keyboard.TypeAsync(caption, new Microsoft.Playwright.KeyboardTypeOptions { Delay = 15 });
+            }
+            var send = p.Locator("[aria-label='Send'], div[role='button'] [data-icon='send']").Last;
+            await send.WaitForAsync(new Microsoft.Playwright.LocatorWaitForOptions { Timeout = 15000 });
+            await send.ClickAsync(new Microsoft.Playwright.LocatorClickOptions { Force = true, Timeout = 8000 });
+            await Task.Delay(4000, ct);   // give the upload time to start; a video can take longer than this to finish
+            if (!string.IsNullOrEmpty(caption)) RememberSent(caption);
+            await ClearSearchAsync(p);
+            _logger.LogInformation("[REAL WhatsApp] file sent to {Name}: {File}", name, Path.GetFileName(filePath));
+            return new SendResult(true, null);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Send file failed"); return new SendResult(false, ex.Message.Split('\n')[0]); }
         finally { _gate.Release(); }
     }
 
@@ -391,5 +505,35 @@ public class RealWhatsAppClient : IWhatsAppClient, IWhatsAppSessionControl, IAsy
     {
         if (_context != null) await _context.CloseAsync();
         _pw?.Dispose();
+    }
+}
+
+/// <summary>
+/// Keeps one client per session (number). Fake mode gives every session its own FakeWhatsAppClient; Real mode gives every session its own
+/// browser profile folder (session.ProfileKey), so each number has its own login and none can disturb another.
+/// </summary>
+public class WhatsAppClientRegistry : IWhatsAppClientRegistry
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, IWhatsAppClient> _clients = new();
+    private readonly Microsoft.Extensions.Configuration.IConfiguration _config;
+    private readonly ILoggerFactory _loggers;
+    private readonly object _lock = new();
+    public event Action<Guid, IWhatsAppClient> ClientCreated;
+
+    public WhatsAppClientRegistry(Microsoft.Extensions.Configuration.IConfiguration config, ILoggerFactory loggers) { _config = config; _loggers = loggers; }
+
+    public IWhatsAppClient Get(Domain.WhatsAppSession session)
+    {
+        if (_clients.TryGetValue(session.Id, out var existing)) return existing;
+        lock (_lock)
+        {
+            if (_clients.TryGetValue(session.Id, out existing)) return existing;
+            IWhatsAppClient client = string.Equals(_config["WhatsApp:Client"], "Real", StringComparison.OrdinalIgnoreCase)
+                ? new RealWhatsAppClient(_loggers.CreateLogger<RealWhatsAppClient>(), _config, session.ProfileKey)
+                : new FakeWhatsAppClient(_loggers.CreateLogger<FakeWhatsAppClient>());
+            _clients[session.Id] = client;
+            ClientCreated?.Invoke(session.Id, client);
+            return client;
+        }
     }
 }

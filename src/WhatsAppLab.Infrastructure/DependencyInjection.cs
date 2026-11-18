@@ -14,14 +14,17 @@ public static class DependencyInjection
         services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<LabDbContext>());
 
         // WhatsApp:Client = Fake (default) or Real. Switching is a configuration change, not a code change.
-        if (string.Equals(config["WhatsApp:Client"], "Real", StringComparison.OrdinalIgnoreCase))
-            services.AddSingleton<IWhatsAppClient, RealWhatsAppClient>();
-        else
-        {
-            services.AddSingleton<FakeWhatsAppClient>();
-            services.AddSingleton<IWhatsAppClient>(sp => sp.GetRequiredService<FakeWhatsAppClient>());
-        }
+        // One client per number (session); the registry creates them on demand.
+        services.AddSingleton<IWhatsAppClientRegistry, WhatsAppClientRegistry>();
 
+        // Media files live outside the repo (default: %LOCALAPPDATA%\aifm-whatsapp-lab\media). Media:Root and Media:MaxMegabytes change that.
+        services.AddSingleton(new MediaOptions
+        {
+            Root = config["Media:Root"] is { Length: > 0 } r ? r : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "aifm-whatsapp-lab", "media"),
+            MaxBytes = (long.TryParse(config["Media:MaxMegabytes"], out var mb) && mb > 0 ? mb : 25) * 1024 * 1024
+        });
+        services.AddScoped<IWhatsAppMediaUseCase, WhatsAppMediaUseCase>();
+        services.AddScoped<IWhatsAppSessionUseCase, WhatsAppSessionUseCase>();
         services.AddScoped<IWhatsAppSettingUseCase, WhatsAppSettingUseCase>();
         services.AddScoped<IWhatsAppGroupUseCase, WhatsAppGroupUseCase>();
         services.AddScoped<IWhatsAppOutboxUseCase, WhatsAppOutboxUseCase>();

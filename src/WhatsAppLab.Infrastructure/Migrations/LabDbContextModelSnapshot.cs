@@ -50,6 +50,9 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("IsAllowed")
+                        .HasColumnType("bit");
+
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("bit");
 
@@ -112,6 +115,9 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("bit");
 
+                    b.Property<Guid?>("MediaId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("MessageType")
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
@@ -140,11 +146,80 @@ namespace WhatsAppLab.Infrastructure.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<Guid?>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.HasKey("Id");
 
                     b.HasIndex("GroupJid", "ReceivedOn");
 
                     b.ToTable("WhatsAppInboundMessageDbSet");
+                });
+
+            modelBuilder.Entity("WhatsAppLab.Domain.WhatsAppMedia", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DeletedBy")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime?>("DeletedOn")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Direction")
+                        .HasColumnType("int");
+
+                    b.Property<string>("FileName")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Kind")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("MimeType")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("ModifiedBy")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime?>("ModifiedOn")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Sha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("StoragePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Sha256");
+
+                    b.ToTable("WhatsAppMediaDbSet");
                 });
 
             modelBuilder.Entity("WhatsAppLab.Domain.WhatsAppOutboundMessage", b =>
@@ -191,6 +266,13 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("bit");
 
+                    b.Property<Guid?>("MediaId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("MessageType")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
@@ -204,6 +286,9 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<DateTime?>("SentOn")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<int>("Source")
                         .HasColumnType("int");
 
@@ -216,7 +301,7 @@ namespace WhatsAppLab.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("Status", "ScheduledFor");
+                    b.HasIndex("SessionId", "Status", "ScheduledFor");
 
                     b.ToTable("WhatsAppOutboundMessageDbSet");
                 });
@@ -241,6 +326,9 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<DateTime?>("DeletedOn")
                         .HasColumnType("datetime2");
 
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("bit");
 
@@ -261,9 +349,17 @@ namespace WhatsAppLab.Infrastructure.Migrations
                     b.Property<DateTime?>("ModifiedOn")
                         .HasColumnType("datetime2");
 
+                    b.Property<string>("Name")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.Property<string>("PhoneNumber")
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("ProfileKey")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
 
                     b.Property<byte[]>("SessionData")
                         .HasColumnType("varbinary(max)");
@@ -272,6 +368,8 @@ namespace WhatsAppLab.Infrastructure.Migrations
                         .HasColumnType("int");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ProfileKey");
 
                     b.ToTable("WhatsAppSessionDbSet");
                 });
@@ -332,6 +430,9 @@ namespace WhatsAppLab.Infrastructure.Migrations
 
                     b.Property<int?>("SendToHour")
                         .HasColumnType("int");
+
+                    b.Property<Guid?>("SessionId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<int?>("WindowMinutes")
                         .HasColumnType("int");
